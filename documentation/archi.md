@@ -74,7 +74,7 @@ C4Container
   Rel(rt_processor, dynamodb, "Atomic counter updates", "UpdateItem ADD")
   Rel(rt_processor, sqs, "Broadcast signal", "SendMessage FIFO")
   Rel(sqs, broadcaster, "Deduplicated signal", "SQS trigger")
-  Rel(broadcaster, dynamodb, "Read aggregates + connections", "Query")
+  Rel(broadcaster, dynamodb, "Read aggregates + connections", "Query + DeleteItem")
   Rel(broadcaster, apigw, "Push snapshots", "postToConnection")
   Rel(apigw, dashboard, "stats.update messages", "WebSocket")
   Rel(analyst, dashboard, "Views live metrics", "Browser")
@@ -114,7 +114,7 @@ sequenceDiagram
     RTP->>RTP: Compute window key (minute bucket)<br/>Compute shard_id = hash(event_id) % 10
     RTP->>DDB: UpdateItem ADD counters<br/>PK=METRIC#GLOBAL_ACTIVITY#SHARD#{shard_id}<br/>SK=WINDOW#{minute}
     RTP->>DDB: UpdateItem ADD counters<br/>PK=METRIC#WIKI_ACTIVITY#WIKI#{wiki}<br/>SK=WINDOW#{minute}
-    alt change_type == edit|new AND namespace == 0
+    alt namespace == 0
       RTP->>DDB: UpdateItem ADD events_count<br/>PK=METRIC#TOP_PAGES#WIKI#{wiki}<br/>SK=WINDOW#{minute}#TITLE#{title}
     end
     RTP->>DDB: UpdateItem ADD events_count<br/>PK=METRIC#CHANGE_TYPE#TYPE#{type}<br/>SK=WINDOW#{minute}
@@ -134,7 +134,7 @@ sequenceDiagram
 
   loop For each connectionId
     BRD->>AGW: postToConnection(connectionId, stats.update)
-    alt GoneException (client disconnected)
+    alt GoneException (client disconnected silently)
       BRD->>DBC: DeleteItem connectionId
     end
   end
@@ -223,7 +223,7 @@ sequenceDiagram
 
   GL2->>S3S: Read silver partition (same hour)
   GL2->>GL2: Aggregate top_wikis_by_hour<br/>Aggregate bot_vs_human_by_hour<br/>Aggregate change_type_distribution<br/>Aggregate top_pages_by_day (namespace=0 only)<br/>Compute z_score for activity_spikes
-  GL2->>S3G: Write gold Parquet datasets<br/>(4 tables, partitioned by time)
+  GL2->>S3G: Write 5 gold Parquet datasets<br/>(partitioned by time)
   GL2->>CAT: Update gold partition metadata
 
   Note over ATH: Partition projection — no MSCK REPAIR needed
@@ -248,24 +248,21 @@ sequenceDiagram
   participant OPS as Platform Engineer<br/>Email / SMS
 
   KDS->>ALP: Trigger Lambda with 1-minute batch
-  ALP->>ALP: Count events in batch<br/>Retrieve rolling 30-min average from Lambda state<br/>(or DynamoDB metric history)
+  ALP->>ALP: Count events in batch<br/>Load rolling 30-min window from state<br/>(in-memory V1 — DynamoDB persistence in V2)
 
   ALP->>ALP: Compute z_score<br/>= (current_count - rolling_avg) / rolling_stddev
 
-  alt z_score > 2.0 (spike detected)
+  alt z_score > 2.0 — global spike detected
     ALP->>ALP: Build alert payload<br/>{"wiki":"global","events":1840,"avg":1240,"z_score":2.7,"window":"..."}
     ALP->>SNS: Publish alert message
+    SNS->>OPS: Email / SMS notification<br/>"Activity spike: 1840 events/min vs avg 1240 (z=2.7)"
+  else log_type burst — moderation spike
+    Note over ALP: delete|block events > 3x normal in 5 min<br/>→ potential coordinated vandalism
+    ALP->>SNS: Publish moderation alert<br/>"45 deletions in 5 min (normal: 12)"
     SNS->>OPS: Email / SMS notification
-    Note over OPS: "Activity spike detected:<br/>1840 events/min vs avg 1240 (z=2.7)"
   else normal activity
     ALP->>ALP: Update rolling window state
     Note over ALP: No alert — continue monitoring
-  end
-
-  alt log_type burst detected
-    Note over ALP: Additional rule:<br/>If delete|block events > 3x normal in 5 min<br/>→ potential coordinated vandalism
-    ALP->>SNS: Publish moderation alert
-    SNS->>OPS: "Moderation spike: 45 deletions in 5 min (normal: 12)"
   end
 ```
 
@@ -294,10 +291,10 @@ sequenceDiagram
   Note over ECS: ECS service restart policy triggers
 
   ECS->>Col: Launch new Fargate task
-  Col->>Wiki: Reconnect SSE (with Last-Event-ID header if stored)
-  Wiki-->>Col: Resume stream from last known offset
+  Col->>Wiki: Reconnect SSE (Last-Event-ID not guaranteed after crash)
+  Wiki-->>Col: Resume live stream from current position
 
-  Note over KDS: Gap in events during downtime<br/>SSE is a live stream — missed events are not recoverable<br/>Firehose archive unaffected (independent consumer)
+  Note over KDS: Gap during downtime is not recoverable<br/>SSE is a live stream — no replay from last offset<br/>Last-Event-ID persistence is a V2 improvement<br/>Firehose archive unaffected (independent consumer)
 
   Col->>KDS: Resume PutRecords
   CW->>CW: Alarm resolves: RunningTaskCount = 1
@@ -373,7 +370,7 @@ flowchart TD
     GLU["Glue ETL bronze→silver\nHourly"]
     S3S["S3 Silver\nContract 10 — Parquet typed\nNull-safe schema"]
     GL2["Glue ETL silver→gold\nHourly"]
-    S3G["S3 Gold\nContract 11 — Pre-aggregated\n4 datasets"]
+    S3G["S3 Gold\nContract 11 — Pre-aggregated\n5 datasets"]
     ATH["Athena\nSQL on S3\nPartition projection"]
     QS["QuickSight\nHistorical dashboards\nSPICE refresh hourly"]
   end
@@ -438,6 +435,11 @@ erDiagram
     number events_count
     number bot_events
     number human_events
+    number edit_events
+    number new_events
+    number categorize_events
+    number log_events
+    number external_events
     number ttl "window_start + 2h"
   }
 

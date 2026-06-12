@@ -2,7 +2,6 @@
 
 AWS-native streaming platform that ingests live Wikimedia activity, processes it in real time, pushes aggregated metrics to a live WebSocket dashboard, and archives everything in a Medallion Data Lake for historical analysis.
 
-Built as a **portfolio-grade AWS Cloud Architecture** project.
 
 ---
 
