@@ -465,24 +465,3 @@ erDiagram
     number ttl "connected_at + 2h"
   }
 ```
-
----
-
-## RENDERING GUIDE
-
-Pour rendre ces diagrammes :
-
-**GitHub / GitLab**
-Coller le bloc mermaid dans un fichier .md — rendu automatique.
-
-**Notion**
-Bloc /code → sélectionner Mermaid.
-
-**VSCode**
-Extension : Markdown Preview Mermaid Support.
-
-**Live preview**
-https://mermaid.live — coller le code directement.
-
-**Export PNG/SVG haute résolution**
-https://mermaid.live → bouton Export → PNG ou SVG.
