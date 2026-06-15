@@ -11,11 +11,11 @@
 
 resource "aws_security_group" "ecs_collector" {
   name        = "${local.name_prefix}-ecs-collector-sg"
-  description = "ECS Fargate SSE Collector — outbound HTTPS only"
+  description = "ECS Fargate SSE Collector  outbound HTTPS only"
   vpc_id      = aws_vpc.main.id
 
   egress {
-    description = "HTTPS outbound — Wikimedia SSE and AWS service endpoints"
+    description = "HTTPS outbound Wikimedia SSE and AWS service endpoints"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
@@ -32,7 +32,7 @@ resource "aws_security_group" "ecs_collector" {
 
 resource "aws_security_group" "vpc_endpoints" {
   name        = "${local.name_prefix}-vpce-sg"
-  description = "VPC Interface Endpoints — accept HTTPS from within VPC"
+  description = "VPC Interface Endpoints accept HTTPS from within VPC"
   vpc_id      = aws_vpc.main.id
 
   ingress {

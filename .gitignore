@@ -2,3 +2,8 @@ README.local.md
 doc/
 implementation.md
 local/
+
+**/.terraform/*
+*.tfstate
+*.tfstate.backup
+*.tfvars.json  
