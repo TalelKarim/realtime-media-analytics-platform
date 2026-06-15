@@ -2,7 +2,6 @@
 
 AWS-native streaming platform that ingests live Wikimedia activity, processes it in real time, pushes aggregated metrics to a live WebSocket dashboard, and archives everything in a Medallion Data Lake for historical analysis.
 
-
 ---
 
 ## What it does
@@ -48,6 +47,49 @@ Official schema:
 ```
 https://github.com/wikimedia/mediawiki-event-schemas/blob/master/jsonschema/mediawiki/recentchange/current.yaml
 ```
+
+---
+
+## Dev Environment — Cost Control & Sampling
+
+Running this platform at full throughput (1000 events/sec) for 12 hours costs approximately **$200**, driven almost entirely by DynamoDB write volume (~157M WRUs).
+
+To make development and testing affordable, the Collector supports a configurable **sampling rate** via environment variable:
+
+```
+COLLECTOR_SAMPLE_RATE=0.10   # dev  → 10% of the stream (~100 events/sec)
+COLLECTOR_SAMPLE_RATE=1.0    # prod → full throughput (1000 events/sec)
+```
+
+### How sampling works
+
+```python
+import os, random
+
+SAMPLE_RATE = float(os.environ.get('COLLECTOR_SAMPLE_RATE', '1.0'))
+
+def process_event(event):
+    if random.random() > SAMPLE_RATE:
+        return  # drop this event
+    send_to_kinesis(normalize(event))
+```
+
+### Cost comparison
+
+| Mode | Events/sec | Volume (12h) | Estimated cost |
+|---|---|---|---|
+| Production | 1 000 | ~43M events / 26 GB | ~$200 |
+| Dev (10% sampling) | 100 | ~4.3M events / 2.6 GB | ~$20 |
+| Dev (1% sampling) | 10 | ~430K events / 260 MB | ~$2 |
+
+### Important note on sampled metrics
+
+When running with `COLLECTOR_SAMPLE_RATE=0.10`, all real-time aggregates
+(events/min, bot ratio, top wikis, top pages) reflect **10% of actual activity**.
+Multiply displayed values by `1 / SAMPLE_RATE` to extrapolate production-equivalent figures.
+
+The architecture, data contracts, and pipeline behavior are **identical** at any sampling rate.
+Sampling only affects ingestion volume — not the system design.
 
 ---
 

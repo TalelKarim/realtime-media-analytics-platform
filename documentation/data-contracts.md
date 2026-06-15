@@ -94,7 +94,7 @@ log_action_comment    ❌     ❌      ❌          ⚠️      ❌
   "title": "File:DESERT SCIMITAR 130430-M-OC922-009.jpg",
   "comment": "add location United States inside Taken On on template",
   "parsedcomment": "add location United States inside Taken On on template",
-  "timestamp": 1630070418,
+  "timestamp": 1781196065,
   "user": "RudolphousBot",
   "bot": true,
   "minor": true,
@@ -126,7 +126,7 @@ log_action_comment    ❌     ❌      ❌          ⚠️      ❌
   "namespace": 14,
   "title": "Category:Photos by RudolphousBot",
   "comment": "File:DESERT_SCIMITAR.jpg added to category",
-  "timestamp": 1630070478,
+  "timestamp": 1781196180,
   "user": "RudolphousBot",
   "bot": true,
   "server_url": "https://commons.wikimedia.org",
@@ -154,7 +154,7 @@ log_action_comment    ❌     ❌      ❌          ⚠️      ❌
   "namespace": -1,
   "title": "Fake News Article 2026",
   "comment": "Spam: blatant advertising",
-  "timestamp": 1630070538,
+  "timestamp": 1781196240,
   "user": "Fastily",
   "bot": false,
   "server_url": "https://en.wikipedia.org",
@@ -311,7 +311,7 @@ The Collector transforms every raw Wikimedia event into this unified, null-safe 
     "delta_bytes": 23,
     "revision_old": 585514253,
     "revision_new": 586543834,
-    "notify_url": null,
+    "notify_url": "https://commons.wikimedia.org/w/index.php?diff=586543834&oldid=585514253",
     "log_type": null,
     "log_action": null,
     "log_params": null
@@ -525,7 +525,7 @@ TTL = `connected_at + 7200` (2 hours). Protects against ghost connections when `
 
 ```
 MessageGroupId        = "broadcast-signal"
-MessageDeduplicationId = "aggregates-window-2026-06-11T16:44:00Z"
+MessageDeduplicationId = "aggregates-window-2026-06-11T16:44"
 ```
 
 Deduplication ensures only one broadcast per time window, regardless of how many Lambda invocations write to the same window concurrently.
