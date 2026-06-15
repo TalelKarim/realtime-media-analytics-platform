@@ -436,7 +436,7 @@ Broadcaster reads `SHARD#0` through `SHARD#9` and sums all counters.
   "categorize_events": 40,
   "log_events": 8,
   "external_events": 0,
-  "ttl": 1781214240
+  "ttl": 1781203440
 }
 ```
 
@@ -454,7 +454,7 @@ Log events (namespace = -1) and categorize events (namespace = 14) are excluded.
   "events_count": 6,
   "last_change_type": "edit",
   "last_seen_at": "2026-06-11T16:44:09Z",
-  "ttl": 1781214240
+  "ttl": 1781203440
 }
 ```
 
@@ -468,7 +468,7 @@ All five types tracked: `edit` · `new` · `categorize` · `log` · `external`
   "SK": "WINDOW#2026-06-11T16:44",
   "change_type": "edit",
   "events_count": 850,
-  "ttl": 1781214240
+  "ttl": 1781203440
 }
 ```
 
@@ -482,7 +482,7 @@ Namespace -1 (log events) is a valid value and is tracked.
   "SK": "WINDOW#2026-06-11T16:44",
   "namespace": 0,
   "events_count": 620,
-  "ttl": 1781214240
+  "ttl": 1781203440
 }
 ```
 

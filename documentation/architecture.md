@@ -328,7 +328,7 @@ custom:broadcaster:gone_connections      stale connections removed on GoneExcept
 |---|---|
 | ECS Fargate Collector | `kinesis:PutRecord`, `kinesis:PutRecords`, `logs:PutLogEvents` |
 | Realtime Processor Lambda | `kinesis:GetRecords`, `kinesis:GetShardIterator`, `dynamodb:UpdateItem`, `sqs:SendMessage` |
-| Broadcaster Lambda | `dynamodb:Query`, `sqs:ReceiveMessage`, `execute-api:ManageConnections` |
+| Broadcaster Lambda | `dynamodb:Query`, `dynamodb:DeleteItem`, `sqs:ReceiveMessage`, `execute-api:ManageConnections` |
 | Connect / Disconnect / Default Lambdas | `dynamodb:PutItem`, `dynamodb:DeleteItem`, `dynamodb:UpdateItem` |
 | Alert Processor Lambda | `kinesis:GetRecords`, `sns:Publish` |
 | Glue ETL Jobs | `s3:GetObject`, `s3:PutObject`, `glue:*` |
