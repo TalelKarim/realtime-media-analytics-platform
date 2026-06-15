@@ -30,3 +30,38 @@ output "nat_gateway_public_ip" {
   description = "NAT Gateway public IP"
   value       = module.networking.nat_gateway_public_ip
 }
+
+
+
+# iam outputs 
+# Phase 3 outputs — IAM
+
+output "ecs_collector_execution_role_arn" {
+  description = "ECS collector execution role ARN"
+  value       = module.iam.ecs_collector_execution_role_arn
+}
+
+output "ecs_collector_task_role_arn" {
+  description = "ECS collector task role ARN"
+  value       = module.iam.ecs_collector_task_role_arn
+}
+
+output "lambda_role_arns" {
+  description = "Lambda runtime role ARNs"
+  value       = module.iam.lambda_role_arns
+}
+
+output "firehose_role_arn" {
+  description = "Firehose role ARN"
+  value       = module.iam.firehose_role_arn
+}
+
+output "glue_role_arn" {
+  description = "Glue role ARN"
+  value       = module.iam.glue_role_arn
+}
+
+output "iam_future_resource_names" {
+  description = "Future resource names assumed by IAM"
+  value       = module.iam.future_resource_names
+}
