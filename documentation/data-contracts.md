@@ -187,7 +187,7 @@ log_action_comment    ❌     ❌      ❌          ⚠️      ❌
   "namespace": -1,
   "title": "User:Vandal1234",
   "comment": "Persistent vandalism",
-  "timestamp": 1630070598,
+  "timestamp": 1781196300,
   "user": "ClueBot NG",
   "bot": true,
   "server_url": "https://en.wikipedia.org",
@@ -414,7 +414,7 @@ TTL = `window_start + 7200` (2 hours). Items auto-expire after the historical an
   "categorize_events": 35,
   "log_events": 5,
   "external_events": 0,
-  "ttl": 1781214240
+  "ttl": 1781203440
 }
 ```
 
@@ -501,7 +501,7 @@ Common namespace values: `-1` (Special/log) · `0` (Article) · `1` (Talk) · `2
   "connected_at": "2026-06-11T16:44:08Z",
   "client_type": "dashboard",
   "topics": ["global", "wiki:enwiki", "top_pages"],
-  "ttl": 1781221448
+  "ttl": 1781203448
 }
 ```
 

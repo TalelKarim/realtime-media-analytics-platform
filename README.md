@@ -4,6 +4,62 @@ AWS-native streaming platform that ingests live Wikimedia activity, processes it
 
 ---
 
+## High-Level Architecture
+
+```
+                       ┌──────────────────────────────┐
+                       │   Wikimedia EventStreams      │
+                       │   recentchange SSE ~1000/sec  │
+                       └──────────────┬───────────────┘
+                                      │ HTTPS / SSE
+                                      ▼
+                       ┌──────────────────────────────┐
+                       │   ECS Fargate Collector       │
+                       │   parse · normalize · batch   │
+                       └──────────────┬───────────────┘
+                                      │ PutRecords
+                                      ▼
+                       ┌──────────────────────────────┐
+                       │   Kinesis Data Streams        │
+                       │   central event backbone      │
+                       └──────┬───────────┬────────────┘
+                              │           │           │
+              ┌───────────────┘           │           └──────────────┐
+              ▼                           ▼                          ▼
+ ┌────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
+ │ Realtime Processor │    │ Firehose Delivery   │    │ Alert Processor     │
+ │ Lambda             │    │ Stream              │    │ Lambda              │
+ └────────┬───────────┘    └──────────┬──────────┘    └──────────┬──────────┘
+          │                           │                           │
+          ▼                           ▼                           ▼
+ ┌────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
+ │ DynamoDB           │    │ S3 Data Lake        │    │ SNS Topic           │
+ │ realtime_aggregates│    │ bronze/silver/gold  │    │ alerts              │
+ │ websocket_conns    │    └──────────┬──────────┘    └─────────────────────┘
+ └────────┬───────────┘               │
+          ▼                           ▼
+ ┌────────────────────┐    ┌─────────────────────┐
+ │ SQS FIFO           │    │ Glue Data Catalog   │
+ │ broadcast signal   │    └──────────┬──────────┘
+ └────────┬───────────┘               │
+          ▼                           ▼
+ ┌────────────────────┐    ┌─────────────────────┐
+ │ Broadcaster Lambda │    │ Athena              │
+ └────────┬───────────┘    └──────────┬──────────┘
+          ▼                           ▼
+ ┌────────────────────┐    ┌─────────────────────┐
+ │ API Gateway        │    │ QuickSight          │
+ │ WebSocket          │    │ historical dashboards│
+ └────────┬───────────┘    └─────────────────────┘
+          ▼
+ ┌────────────────────┐
+ │ Frontend Dashboard │
+ │ live visualization │
+ └────────────────────┘
+```
+
+---
+
 ## What it does
 
 | Capability | Technology |
@@ -98,10 +154,10 @@ Sampling only affects ingestion volume — not the system design.
 | File | Content |
 |---|---|
 | `README.md` | This file — project overview and index |
-| `./documentation/architecture.md` | High-level and detailed architecture, ADRs, scalability path, security, observability, runbooks |
-| `./documentation/data-contracts.md` | All data contracts across the pipeline (source → Kinesis → DynamoDB → WebSocket → S3 → Gold) |
-| `./documentation/sequence-diagrams.md` | All sequence diagrams in Mermaid format |
-| `./documentation/historical-analytics.md` | Data Lake architecture, Glue ETL, Athena queries, QuickSight dashboards |
+| `documentation/architecture.md` | High-level and detailed architecture, ADRs, scalability path, security, observability, runbooks |
+| `documentation/data-contracts.md` | All data contracts across the pipeline (source → Kinesis → DynamoDB → WebSocket → S3 → Gold) |
+| `documentation/sequence-diagrams.md` | All sequence diagrams in Mermaid format |
+| `documentation/historical-analytics.md` | Data Lake architecture, Glue ETL, Athena queries, QuickSight dashboards |
 
 ---
 
@@ -110,7 +166,7 @@ Sampling only affects ingestion volume — not the system design.
 ```
 realtime-media-analytics-platform/
 ├── README.md
-├── docs/
+├── documentation/
 │   ├── architecture.md
 │   ├── data-contracts.md
 │   ├── sequence-diagrams.md
@@ -127,25 +183,33 @@ realtime-media-analytics-platform/
 ├── services/
 │   ├── collector/
 │   ├── realtime-processor/
+│   ├── alert-processor/
+│   ├── broadcaster/
 │   ├── websocket-connect-handler/
 │   ├── websocket-disconnect-handler/
-│   ├── websocket-default-handler/
-│   └── broadcaster/
+│   └── websocket-default-handler/
 ├── frontend/
 │   └── dashboard/
 └── terraform/
     ├── environments/
     │   └── dev/
+    │       ├── main.tf
+    │       ├── variables.tf
+    │       ├── outputs.tf
+    │       └── terraform.tfvars
     └── modules/
         ├── networking/
-        ├── ecs-collector/
+        ├── kms/
+        ├── iam/
         ├── kinesis/
-        ├── lambda/
+        ├── s3-datalake/
         ├── dynamodb/
         ├── sqs/
+        ├── sns/
+        ├── ecs-collector/
+        ├── lambda/
         ├── apigw-websocket/
         ├── firehose/
-        ├── s3-datalake/
         ├── glue/
         ├── athena/
         └── monitoring/

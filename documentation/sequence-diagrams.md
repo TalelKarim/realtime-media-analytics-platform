@@ -33,7 +33,7 @@ sequenceDiagram
     RTP->>RTP: Compute window key (1-min bucket)<br/>Compute shard_id = hash(event_id) % 10
     RTP->>DDB: UpdateItem ADD counters<br/>METRIC#GLOBAL_ACTIVITY#SHARD#{shard_id} / WINDOW#{minute}
     RTP->>DDB: UpdateItem ADD counters<br/>METRIC#WIKI_ACTIVITY#WIKI#{wiki} / WINDOW#{minute}
-    alt change_type != log AND namespace == 0
+    alt namespace == 0
       RTP->>DDB: UpdateItem ADD events_count<br/>METRIC#TOP_PAGES#WIKI#{wiki} / WINDOW#{minute}#TITLE#{title}
     end
     RTP->>DDB: UpdateItem ADD events_count<br/>METRIC#CHANGE_TYPE#TYPE#{type} / WINDOW#{minute}
