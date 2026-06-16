@@ -172,7 +172,7 @@ Sampling only affects ingestion volume — not the system design.
 | `documentation/data-contracts.md` | All data contracts across the pipeline (source → Kinesis → DynamoDB → WebSocket → S3 → Gold) |
 | `documentation/sequence-diagrams.md` | All sequence diagrams in Mermaid format |
 | `documentation/historical-analytics.md` | Data Lake architecture, Glue ETL, Athena queries, QuickSight dashboards |
-| `documentation/archi.md` | C4 and end-to-end architecture diagrams |
+| `documentation/c4-diagrams.md` | C4 system context and container diagrams|
 
 ---
 
@@ -186,7 +186,7 @@ realtime-media-analytics-platform/
 │   ├── data-contracts.md
 │   ├── sequence-diagrams.md
 │   ├── historical-analytics.md
-│   ├── archi.md
+│   ├── c4-diagrams.md
 │   └── adr/
 │       ├── ADR-001-fargate-collector.md
 │       ├── ADR-002-kinesis-backbone.md

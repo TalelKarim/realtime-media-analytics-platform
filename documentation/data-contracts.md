@@ -452,8 +452,6 @@ The SQS message intentionally does not carry a `topics` list. The Broadcaster de
   "is_partial_window": true,
   "data": {
     "current_minute_events_so_far": 220,
-    "events_last_5s": 120,
-    "estimated_events_per_minute": 1440,
     "last_completed_minute_events": 1240,
     "bot_ratio": 0.42,
     "human_ratio": 0.58,
@@ -485,9 +483,8 @@ The SQS message intentionally does not carry a `topics` list. The Broadcaster de
 Dashboard interpretation:
 ```
 current_minute_events_so_far  → monotonically increases during the minute
-events_last_5s                → true live fluctuation signal
-estimated_events_per_minute   → events_last_5s * 12
 last_completed_minute_events  → stable completed-minute reference
+broadcast_window              → dashboard refresh trigger, not a separate aggregation window
 ```
 
 ---
