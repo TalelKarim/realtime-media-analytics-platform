@@ -529,7 +529,6 @@ resource "aws_iam_role_policy" "firehose" {
         Action = [
           "s3:AbortMultipartUpload",
           "s3:GetBucketLocation",
-          "s3:GetObject",
           "s3:ListBucket",
           "s3:ListBucketMultipartUploads",
           "s3:PutObject"
@@ -587,9 +586,8 @@ resource "aws_iam_role_policy" "glue" {
           "s3:GetBucketLocation",
           "s3:ListBucket",
           "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject"
-        ]
+          "s3:PutObject"
+          ]
         Resource = [
           local.datalake_bucket_arn,
           local.datalake_bucket_objects_arn
