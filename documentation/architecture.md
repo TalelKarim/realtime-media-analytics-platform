@@ -164,6 +164,8 @@ top_pages           → top changed pages (namespace=0 only)
 
 ## DynamoDB Tables
 
+
+
 ### Table: websocket_connections
 
 ```
@@ -196,6 +198,27 @@ METRIC#TOP_PAGES#WIKI#{wiki}        /  WINDOW#{minute}#TITLE#{title}
 METRIC#CHANGE_TYPE#TYPE#{type}      /  WINDOW#{minute}
 METRIC#NAMESPACE#NS#{namespace}     /  WINDOW#{minute}
 ```
+
+
+
+### Table: alert_state
+
+```
+PK  = alert_scope   (string)   — "ALERT#GLOBAL" or "ALERT#WIKI#{wiki}"
+SK  = minute_key    (string)   — "MINUTE#{yyyy-MM-ddTHH:mm}"
+
+TTL = minute_start + 2100 seconds (35 minutes)
+```
+
+Stores per-minute event counts for the Alert Processor rolling window.
+The Lambda writes the current minute count and reads the last 30 minutes
+to detect activity spikes via z_score.
+
+Design note: 35-minute TTL provides 5 minutes of margin beyond the
+30-minute rolling window used for z_score computation.
+
+
+
 
 ---
 
@@ -330,8 +353,7 @@ custom:broadcaster:gone_connections      stale connections removed on GoneExcept
 | Realtime Processor Lambda | `kinesis:GetRecords`, `kinesis:GetShardIterator`, `dynamodb:UpdateItem`, `sqs:SendMessage` |
 | Broadcaster Lambda | `dynamodb:Query`, `dynamodb:DeleteItem`, `sqs:ReceiveMessage`, `execute-api:ManageConnections` |
 | Connect / Disconnect / Default Lambdas | `dynamodb:PutItem`, `dynamodb:DeleteItem`, `dynamodb:UpdateItem` |
-| Alert Processor Lambda | `kinesis:GetRecords`, `sns:Publish` |
-| Glue ETL Jobs | `s3:GetObject`, `s3:PutObject`, `glue:*` |
+| Alert Processor Lambda | `kinesis:GetRecords`, `kinesis:GetShardIterator`, `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:UpdateItem`, `dynamodb:Query`, `sns:Publish` || Glue ETL Jobs | `s3:GetObject`, `s3:PutObject`, `glue:*` |
 
 ### Encryption
 

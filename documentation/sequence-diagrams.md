@@ -160,24 +160,35 @@ sequenceDiagram
   autonumber
   participant KDS as Kinesis Data Streams
   participant ALP as Alert Processor Lambda
+  participant DDB as DynamoDB alert_state
   participant SNS as SNS Topic
   participant OPS as Platform Engineer
 
-  KDS->>ALP: Trigger Lambda — 1-minute batch
-  ALP->>ALP: Count events in batch<br/>Load rolling 30-min window from state
-  ALP->>ALP: z_score = (current - rolling_avg) / rolling_stddev
+  KDS->>ALP: Trigger Lambda - 1-minute batch
+  ALP->>ALP: Count events in batch
 
-  alt z_score > 2.0 — global spike detected
-    ALP->>SNS: Publish alert<br/>{"wiki":"global","events":1840,"avg":1240,"z_score":2.7}
-    SNS->>OPS: Email / SMS<br/>"Activity spike: 1840 events/min vs avg 1240 (z=2.7)"
-  else log_type burst — moderation spike
-    Note over ALP: delete|block events > 3× normal in 5 min
-    ALP->>SNS: Publish moderation alert<br/>"45 deletions in 5 min (normal: 12)"
-    SNS->>OPS: Email / SMS
-  else normal
-    ALP->>ALP: Update rolling window state — no alert
+  ALP->>DDB: PutItem ALERT#GLOBAL / MINUTE#{current_minute}
+  Note over DDB: event_count = len(batch), ttl = now + 2100
+
+  ALP->>DDB: Query ALERT#GLOBAL SK between {now-30min} and {now}
+  DDB-->>ALP: Up to 30 items (last 30 minutes of counts)
+
+  ALP->>ALP: Compute rolling_avg and rolling_stddev from 30 items
+  ALP->>ALP: z_score = (current_count - rolling_avg) / rolling_stddev
+
+  alt z_score > 2.0 - global spike detected
+    ALP->>SNS: Publish alert
+    Note over SNS: {"wiki":"global","events":1840,"avg":1240,"z_score":2.7}
+    SNS->>OPS: Email / SMS - "Activity spike: 1840 events/min vs avg 1240 (z=2.7)"
+  else log_type burst - moderation spike
+    Note over ALP: delete|block events > 3x normal in 5 min
+    ALP->>SNS: Publish moderation alert
+    SNS->>OPS: Email / SMS - "45 deletions in 5 min (normal: 12)"
+  else normal activity
+    ALP->>ALP: No alert - state already persisted in DynamoDB
   end
 ```
+
 
 ---
 

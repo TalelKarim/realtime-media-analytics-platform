@@ -488,6 +488,59 @@ Namespace -1 (log events) is a valid value and is tracked.
 
 Common namespace values: `-1` (Special/log) · `0` (Article) · `1` (Talk) · `2` (User) · `4` (Project) · `6` (File) · `10` (Template) · `14` (Category)
 
+
+### 3f — Alert Processor State
+
+**Producer:** Alert Processor Lambda
+**Consumer:** Alert Processor Lambda (self — read on each invocation)
+
+One item per minute per tracked scope (global + per-wiki).
+The Lambda writes the current minute count, then reads the last
+30 items to compute the rolling average and z_score.
+
+TTL = `minute_start + 2100` (35 minutes).
+Keeps 35 minutes of history — 5 minutes of margin beyond the 30-minute
+rolling window. Items older than 35 minutes are auto-deleted by DynamoDB.
+
+```json
+{
+  "PK": "ALERT#GLOBAL",
+  "SK": "MINUTE#2026-06-11T16:44",
+  "minute_start": "2026-06-11T16:44:00Z",
+  "event_count": 1240,
+  "ttl": 1781198340
+}
+```
+
+Per-wiki scope (used for wiki-level spike detection):
+
+```json
+{
+  "PK": "ALERT#WIKI#enwiki",
+  "SK": "MINUTE#2026-06-11T16:44",
+  "minute_start": "2026-06-11T16:44:00Z",
+  "event_count": 380,
+  "ttl": 1781198340
+}
+```
+
+Access patterns:
+```
+Write (each invocation) : PutItem PK=ALERT#GLOBAL SK=MINUTE#{current_minute}
+Read  (each invocation) : Query PK=ALERT#GLOBAL SK between {now-30min} and {now}
+                          → returns up to 30 items → compute z_score
+```
+
+Known limitation (V1):
+```
+If two Lambda invocations process the same minute concurrently,
+the last write wins (PutItem overwrites). This is acceptable because
+both invocations process the same Kinesis batch for the same window
+and will produce the same event_count value.
+```
+
+
+
 ---
 
 ## Contract 4 — DynamoDB websocket_connections
