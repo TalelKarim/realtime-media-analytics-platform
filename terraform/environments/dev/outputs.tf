@@ -99,3 +99,36 @@ output "kinesis_retention_period_hours" {
   description = "Retention period in hours for the Wikimedia Kinesis event stream."
   value       = module.kinesis.retention_period_hours
 }
+
+
+
+# dynamodb outputs
+output "dynamodb_realtime_aggregates_table_name" {
+  description = "Name of the realtime aggregates DynamoDB table."
+  value       = module.dynamodb.realtime_aggregates_table_name
+}
+
+output "dynamodb_realtime_aggregates_table_arn" {
+  description = "ARN of the realtime aggregates DynamoDB table."
+  value       = module.dynamodb.realtime_aggregates_table_arn
+}
+
+output "dynamodb_websocket_connections_table_name" {
+  description = "Name of the WebSocket connections DynamoDB table."
+  value       = module.dynamodb.websocket_connections_table_name
+}
+
+output "dynamodb_websocket_connections_table_arn" {
+  description = "ARN of the WebSocket connections DynamoDB table."
+  value       = module.dynamodb.websocket_connections_table_arn
+}
+
+output "dynamodb_alert_state_table_name" {
+  description = "Name of the alert state DynamoDB table."
+  value       = module.dynamodb.alert_state_table_name
+}
+
+output "dynamodb_alert_state_table_arn" {
+  description = "ARN of the alert state DynamoDB table."
+  value       = module.dynamodb.alert_state_table_arn
+}

@@ -199,12 +199,12 @@ resource "aws_iam_role" "alert_processor" {
 
 locals {
   lambda_roles = {
-    realtime_processor    = aws_iam_role.realtime_processor.name
-    broadcaster           = aws_iam_role.broadcaster.name
-    websocket_connect     = aws_iam_role.websocket_connect.name
-    websocket_disconnect  = aws_iam_role.websocket_disconnect.name
-    websocket_default     = aws_iam_role.websocket_default.name
-    alert_processor       = aws_iam_role.alert_processor.name
+    realtime_processor   = aws_iam_role.realtime_processor.name
+    broadcaster          = aws_iam_role.broadcaster.name
+    websocket_connect    = aws_iam_role.websocket_connect.name
+    websocket_disconnect = aws_iam_role.websocket_disconnect.name
+    websocket_default    = aws_iam_role.websocket_default.name
+    alert_processor      = aws_iam_role.alert_processor.name
   }
 }
 
@@ -587,7 +587,7 @@ resource "aws_iam_role_policy" "glue" {
           "s3:ListBucket",
           "s3:GetObject",
           "s3:PutObject"
-          ]
+        ]
         Resource = [
           local.datalake_bucket_arn,
           local.datalake_bucket_objects_arn
