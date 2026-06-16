@@ -65,3 +65,37 @@ output "iam_future_resource_names" {
   description = "Future resource names assumed by IAM"
   value       = module.iam.future_resource_names
 }
+
+
+
+
+# kinesis outputs
+output "kinesis_stream_name" {
+  description = "Name of the Wikimedia Kinesis event stream."
+  value       = module.kinesis.stream_name
+}
+
+output "kinesis_stream_arn" {
+  description = "ARN of the Wikimedia Kinesis event stream."
+  value       = module.kinesis.stream_arn
+}
+
+output "kinesis_stream_id" {
+  description = "ID of the Wikimedia Kinesis event stream."
+  value       = module.kinesis.stream_id
+}
+
+output "kinesis_stream_mode" {
+  description = "Capacity mode of the Wikimedia Kinesis event stream."
+  value       = module.kinesis.stream_mode
+}
+
+output "kinesis_shard_count" {
+  description = "Number of provisioned shards for the Wikimedia Kinesis event stream."
+  value       = module.kinesis.shard_count
+}
+
+output "kinesis_retention_period_hours" {
+  description = "Retention period in hours for the Wikimedia Kinesis event stream."
+  value       = module.kinesis.retention_period_hours
+}
