@@ -149,6 +149,7 @@ This gives the project a stable real-time contract while preserving source fidel
 }
 ```
 
+
 ### Field mapping
 
 | Normalized field | Source field | Rule |

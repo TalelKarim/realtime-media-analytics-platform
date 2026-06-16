@@ -424,7 +424,13 @@ custom:alert:alerts_published            SNS alerts published
 ### CloudWatch Alarms
 
 | Alarm | Metric | Threshold | Action |
+
 |---|---|---|---|
+|Realtime Processor lag | Lambda IteratorAge | > 60 000 ms | SNS
+|Alert Processor lag    | Lambda IteratorAge | > 60 000 ms | SNS
+|Firehose freshness lag | DeliveryToS3.DataFreshness | > 300 000 ms | SNS
+|Kinesis read throttles | ReadProvisionedThroughputExceeded | > 0 | SNS
+|Kinesis write throttles| WriteProvisionedThroughputExceeded | > 0 | SNS
 | Kinesis iterator age high | `GetRecords.IteratorAgeMilliseconds` | > 60 000 ms | SNS |
 | Realtime processor errors | Lambda `Errors` | > 5 in 5 min | SNS |
 | Broadcaster errors | Lambda `Errors` | > 5 in 5 min | SNS |
@@ -433,7 +439,7 @@ custom:alert:alerts_published            SNS alerts published
 | SQS queue depth | `ApproximateNumberOfMessagesVisible` | > 100 | SNS |
 
 **Key metric:** `IteratorAgeMilliseconds` = age of the oldest unprocessed record in the shard. Target: < 5 000 ms.
-
+For Lambda consumers, IteratorAge measures the age of the last Kinesis record included in the batch delivered to that specific Lambda event source mapping. It must be monitored per consumer, not only at stream level.
 ---
 
 ## Security
