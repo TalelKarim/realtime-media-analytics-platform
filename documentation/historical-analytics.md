@@ -7,7 +7,7 @@
 ```
 Kinesis Data Streams
   → Kinesis Firehose       (buffer 64MB / 5min → S3)
-  → S3 Bronze              (raw JSON, immutable)
+  → S3 Bronze              (normalized envelope + raw_event, immutable)
   → Glue ETL bronze→silver (hourly, Parquet)
   → S3 Silver              (cleaned, typed, null-safe)
   → Glue ETL silver→gold   (hourly, pre-aggregated)
@@ -30,10 +30,12 @@ Buffer size    : 64 MB
 Buffer time    : 300 seconds (5 minutes)
 Trigger        : whichever condition is met first
 Compression    : GZIP on delivery
-Latency        : raw events available in S3 within 5 minutes
+Latency        : Bronze envelope files available in S3 within 5 minutes
 ```
 
-Dynamic partitioning enabled — uses `occurred_at` from the event payload (not Firehose delivery timestamp) to set the S3 prefix:
+Firehose reads the same Kinesis record consumed by the real-time path: the normalized envelope with an embedded `raw_event`.
+
+Dynamic partitioning uses the envelope-level `occurred_at` field, not the Firehose delivery timestamp:
 
 ```
 bronze/wikimedia/recentchange/
@@ -69,14 +71,17 @@ s3://realtime-media-analytics-datalake/
     └── activity_spikes/year=2026/month=06/day=11/
 ```
 
-### Bronze — Raw
+### Bronze — Normalized envelope + raw_event
 
 ```
-Format    : JSON Lines (.json.gz) — one Wikimedia event per line
-Schema    : raw Wikimedia recentchange — no transformation, all fields as-is
-Purpose   : immutable archive, event replay, schema recovery
+Format    : JSON Lines (.json.gz)
+Schema    : Contract 2 — normalized envelope with embedded raw_event
+Purpose   : immutable source-fidelity archive, event replay, schema recovery
 Retention : 2 years → Glacier after 90 days
 ```
+
+Bronze is not raw-only. It stores the exact Kinesis envelope produced by the Collector.  
+The original Wikimedia JSON remains available inside `raw_event`.
 
 ### Silver — Cleaned
 
@@ -86,6 +91,8 @@ Schema    : typed, null-safe normalized schema (see data-contracts.md Contract 1
 Purpose   : ad-hoc Athena queries across the full event history
 Retention : 1 year → Glacier after 60 days
 ```
+
+Silver is built from the envelope-level fields and `payload`. It does not need to include the full `raw_event` by default because Bronze remains the source-fidelity archive.
 
 ### Gold — Pre-aggregated
 
@@ -112,43 +119,55 @@ Workers  : 2 × G.1X (scalable)
 Transformations applied:
 
 ```python
-# Drop invalid records
-df = df.filter(col("meta.id").isNotNull())
-df = df.filter(col("meta.dt").isNotNull())
+from pyspark.sql.functions import col, to_date, to_json, when
 
-# Parse and derive fields
-df = df.withColumn("event_id",       concat(lit("wikimedia-"), col("meta.id")))
-df = df.withColumn("occurred_at",    to_timestamp(col("meta.dt")))
+# Bronze rows are Contract 2 envelopes:
+# event_id, occurred_at, ingested_at, payload.*, raw_event
+
+df = df.filter(col("event_id").isNotNull())
+df = df.filter(col("occurred_at").isNotNull())
+
 df = df.withColumn("ingestion_date", to_date(col("occurred_at")))
-df = df.withColumn("wiki",           lower(col("wiki")))
-df = df.withColumn("user_is_bot",    col("bot").cast("boolean"))
-df = df.withColumn("is_minor",       col("minor").cast("boolean"))    # null if absent
-df = df.withColumn("delta_bytes",
-    when(col("length.new").isNotNull() & col("length.old").isNotNull(),
-         col("length.new") - col("length.old"))
-    .otherwise(None))
-df = df.withColumn("log_params",
-    when(col("log_params").isNotNull(),
-         to_json(col("log_params")))   # serialize to string (type varies)
-    .otherwise(None))
+df = df.withColumn("wiki", lower(col("payload.wiki")))
+df = df.withColumn("user_is_bot", col("payload.user_is_bot").cast("boolean"))
+df = df.withColumn("is_minor", col("payload.is_minor").cast("boolean"))
+df = df.withColumn("is_patrolled", col("payload.is_patrolled").cast("boolean"))
+df = df.withColumn("delta_bytes", col("payload.delta_bytes"))
 
-# Select known columns only — unknown future Wikimedia fields are discarded
-df = df.select(
-    "event_id", "occurred_at", "ingestion_date", "wiki", "domain",
-    col("type").alias("change_type"), "namespace", "title", "title_url",
-    "user", "user_is_bot", "is_minor",
-    col("patrolled").alias("is_patrolled"),
-    "delta_bytes",
-    col("length.old").alias("old_length"),
-    col("length.new").alias("new_length"),
-    col("revision.old").alias("revision_old"),
-    col("revision.new").alias("revision_new"),
-    "log_type", "log_action", "log_params",
-    col("id").alias("wikimedia_rcid"),
+df = df.withColumn(
+    "log_params",
+    when(col("payload.log_params").isNotNull(), to_json(col("payload.log_params")))
+    .otherwise(None)
 )
 
-# Write partitioned Parquet
-df.write.partitionBy("ingestion_date").parquet("s3://bucket/silver/...")
+df = df.select(
+    "event_id",
+    "occurred_at",
+    "ingestion_date",
+    "wiki",
+    col("payload.domain").alias("domain"),
+    col("payload.change_type").alias("change_type"),
+    col("payload.namespace").alias("namespace"),
+    col("payload.title").alias("title"),
+    col("payload.title_url").alias("title_url"),
+    col("payload.user").alias("user"),
+    "user_is_bot",
+    "is_minor",
+    "is_patrolled",
+    col("payload.old_length").alias("old_length"),
+    col("payload.new_length").alias("new_length"),
+    "delta_bytes",
+    col("payload.revision_old").alias("revision_old"),
+    col("payload.revision_new").alias("revision_new"),
+    col("payload.change_url").alias("change_url"),
+    col("payload.raw_notify_url").alias("raw_notify_url"),
+    col("payload.log_type").alias("log_type"),
+    col("payload.log_action").alias("log_action"),
+    "log_params",
+    col("payload.wikimedia_recentchange_id").alias("wikimedia_rcid")
+)
+
+df.write.partitionBy("ingestion_date").mode("append").parquet("s3://bucket/silver/...")
 ```
 
 ### Job 2 — Silver to Gold
@@ -169,11 +188,11 @@ top_wikis = df.groupBy("wiki", window("occurred_at", "1 hour").alias("hour_windo
         count("*").alias("event_count"),
         sum(when(col("user_is_bot"), 1).otherwise(0)).alias("bot_count"),
         sum(when(~col("user_is_bot"), 1).otherwise(0)).alias("human_count"),
-        sum(when(col("change_type")=="edit", 1).otherwise(0)).alias("edit_count"),
-        sum(when(col("change_type")=="new", 1).otherwise(0)).alias("new_count"),
-        sum(when(col("change_type")=="categorize", 1).otherwise(0)).alias("categorize_count"),
-        sum(when(col("change_type")=="log", 1).otherwise(0)).alias("log_count"),
-        sum(when(col("change_type")=="external", 1).otherwise(0)).alias("external_count"),
+        sum(when(col("change_type") == "edit", 1).otherwise(0)).alias("edit_count"),
+        sum(when(col("change_type") == "new", 1).otherwise(0)).alias("new_count"),
+        sum(when(col("change_type") == "categorize", 1).otherwise(0)).alias("categorize_count"),
+        sum(when(col("change_type") == "log", 1).otherwise(0)).alias("log_count"),
+        sum(when(col("change_type") == "external", 1).otherwise(0)).alias("external_count"),
     )
 
 # bot_vs_human_by_hour
@@ -198,8 +217,8 @@ top_pages = df.filter(col("namespace") == 0) \
 change_dist = df.groupBy("change_type", window("occurred_at", "1 hour").alias("hour_window")) \
     .agg(count("*").alias("event_count"))
 
-# activity_spikes — z_score computed over 7-day rolling window per wiki
-# (computed via Athena CTAS or Glue with a lag function over ordered partitions)
+# activity_spikes
+# z_score computed over a rolling historical baseline per wiki/global scope.
 ```
 
 ---
@@ -228,7 +247,7 @@ day   : integer, range 1–31
 hour  : integer, range 0–23
 ```
 
-Partition projection eliminates `MSCK REPAIR TABLE` and makes every partitioned query instant.
+Partition projection eliminates `MSCK REPAIR TABLE`.
 
 ---
 
@@ -237,7 +256,7 @@ Partition projection eliminates `MSCK REPAIR TABLE` and makes every partitioned 
 ```
 Workgroup       : realtime-media-analytics
 Output location : s3://bucket/athena-results/
-Encryption      : SSE-S3
+Encryption      : SSE-KMS with the S3 customer-managed key
 Scan limit      : 1 GB per query (cost control)
 ```
 
@@ -329,14 +348,14 @@ Charts : spike timeline (event_count + z_score overlay)
 
 ## Challenges and mitigations
 
-**Firehose dynamic partitioning**
-By default Firehose uses its own delivery timestamp, not the event's `occurred_at`. Late-arriving events would land in the wrong S3 partition. Mitigation: enable dynamic partitioning with a Firehose Lambda transformer that extracts year/month/day/hour from the event payload.
+**Firehose dynamic partitioning**  
+By default Firehose uses its own delivery timestamp, not the event's `occurred_at`. Late-arriving events would land in the wrong S3 partition. Mitigation: enable dynamic partitioning with a Firehose Lambda transformer or metadata extraction that derives year/month/day/hour from the envelope-level `occurred_at`.
 
-**Small files**
+**Small files**  
 Five-minute Firehose buffers produce many small files. Small files degrade Athena scan performance and increase S3 API costs. Mitigation: run a Glue compaction job every 6 hours targeting 128 MB per Parquet file.
 
-**Schema evolution**
-Wikimedia may add or rename fields. Mitigation: bronze stores raw JSON with full fidelity. Silver ETL explicitly selects known columns and discards unknowns. `event_version` field on the normalized contract enables downstream version detection in V2.
+**Schema evolution**  
+Wikimedia may add or rename fields. Mitigation: Bronze stores the normalized envelope and preserves the original source object in `raw_event`. Silver ETL explicitly selects known payload columns and discards unknowns. `event_version` enables downstream version detection.
 
-**Athena cost**
-Athena charges per TB scanned. Mitigations: year/month/day/hour partitioning for pruning · Parquet columnar format for column pruning · SNAPPY compression for smaller files · 1 GB scan limit per query · gold pre-aggregated tables used by QuickSight instead of silver.
+**Athena cost**  
+Athena charges per TB scanned. Mitigations: year/month/day/hour partitioning for pruning · Parquet columnar format for column pruning · SNAPPY compression · 1 GB scan limit per query · gold pre-aggregated tables used by QuickSight instead of Silver.

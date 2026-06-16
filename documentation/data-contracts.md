@@ -22,15 +22,18 @@ Format   : one JSON object per "data:" line
 Schema   : /mediawiki/recentchange/1.0.0
 ```
 
+The raw event is the JSON object contained in the SSE `data:` line.  
+The Collector does not fetch raw events from another API. It receives them directly from the EventStreams connection.
+
 Five event types emitted by the stream:
 
 | Type | Approx. frequency | Notes |
-|---|---|---|
+|---|---:|---|
 | `edit` | ~60-65% | Article or file modification |
-| `categorize` | ~25-30% | Category membership change — always namespace 14 |
+| `categorize` | ~25-30% | Category membership change — usually namespace 14 |
 | `new` | ~5-8% | New page creation |
-| `log` | ~5-8% | Admin action — always namespace -1 |
-| `external` | <1% | External system change (e.g. Wikidata link) |
+| `log` | ~5-8% | Admin action — usually namespace -1 |
+| `external` | <1% | External system change |
 
 Field presence matrix (verified against official schema + observed stream):
 
@@ -45,7 +48,7 @@ meta.partition        ✅     ✅      ✅          ✅      ✅
 meta.offset           ✅     ✅      ✅          ✅      ✅
 id (rcid, not unique) ✅     ✅      ✅          ✅      ✅
 type                  ✅     ✅      ✅          ✅      ✅
-namespace             ✅     ✅      ✅(=14)     ✅(=-1) ✅(=0)
+namespace             ✅     ✅      ✅          ✅      ✅
 title                 ✅     ✅      ✅          ✅      ✅
 comment               ✅     ✅      ✅          ✅      ✅
 parsedcomment         ⚠️     ⚠️      ⚠️          ⚠️      ⚠️
@@ -56,201 +59,92 @@ server_url            ✅     ✅      ✅          ✅      ✅
 server_name           ✅     ✅      ✅          ✅      ✅
 server_script_path    ✅     ✅      ✅          ✅      ✅
 wiki                  ✅     ✅      ✅          ✅      ✅
-title_url             ⚠️*    ⚠️*     ⚠️*         ⚠️*     ⚠️*
-minor                 ✅     ✅      ❌          ❌      ❌
+title_url             ⚠️     ⚠️      ⚠️          ⚠️      ⚠️
+minor                 ⚠️     ⚠️      ❌          ❌      ❌
 patrolled             ⚠️     ⚠️      ❌          ❌      ❌
-length.old            ✅     ✅(=0)  ❌          ❌      ❌
-length.new            ✅     ✅      ❌          ❌      ❌
-revision.old          ✅     ✅(null)❌          ❌      ❌
-revision.new          ✅     ✅      ❌          ❌      ❌
-log_id                ❌     ❌      ❌          ✅      ❌
-log_type              ❌     ❌      ❌          ✅      ❌
-log_action            ❌     ❌      ❌          ✅      ❌
+length.old            ⚠️     ⚠️      ❌          ❌      ❌
+length.new            ⚠️     ⚠️      ❌          ❌      ❌
+revision.old          ⚠️     ⚠️      ❌          ❌      ❌
+revision.new          ⚠️     ⚠️      ❌          ❌      ❌
+log_id                ❌     ❌      ❌          ⚠️      ❌
+log_type              ❌     ❌      ❌          ⚠️      ❌
+log_action            ❌     ❌      ❌          ⚠️      ❌
 log_params            ❌     ❌      ❌          ⚠️      ❌
 log_action_comment    ❌     ❌      ❌          ⚠️      ❌
 
-✅ always present   ⚠️ optional / config-dependent   ❌ absent for this type
-* title_url: observed in practice but absent from the official schema — treat as optional
+✅ usually present   ⚠️ optional / config-dependent   ❌ absent for this type
 ```
 
-### Real event examples
+Known `log_type` values include:
+`delete` · `restore` · `block` · `unblock` · `protect` · `upload` · `move` · `import` · `patrol` · `rights` · `newusers` · `merge` · `suppress` · `tag`
 
-**type = edit**
-```json
-{
-  "$schema": "/mediawiki/recentchange/1.0.0",
-  "meta": {
-    "id": "e195ebcf-e9ff-4179-9591-0d2384b96117",
-    "dt": "2026-06-11T16:41:05Z",
-    "domain": "commons.wikimedia.org",
-    "stream": "mediawiki.recentchange",
-    "topic": "eqiad.mediawiki.recentchange",
-    "partition": 0,
-    "offset": 6232533545
-  },
-  "id": 1754327016,
-  "type": "edit",
-  "namespace": 6,
-  "title": "File:DESERT SCIMITAR 130430-M-OC922-009.jpg",
-  "comment": "add location United States inside Taken On on template",
-  "parsedcomment": "add location United States inside Taken On on template",
-  "timestamp": 1781196065,
-  "user": "RudolphousBot",
-  "bot": true,
-  "minor": true,
-  "patrolled": true,
-  "length": { "old": 1132, "new": 1155 },
-  "revision": { "old": 585514253, "new": 586543834 },
-  "server_url": "https://commons.wikimedia.org",
-  "server_name": "commons.wikimedia.org",
-  "server_script_path": "/w",
-  "wiki": "commonswiki"
-}
+### Collector filtering rules
+
 ```
-
-**type = categorize**
-```json
-{
-  "$schema": "/mediawiki/recentchange/1.0.0",
-  "meta": {
-    "id": "a9b8c7d6-aaaa-bbbb-cccc-ddddeeeeffff",
-    "dt": "2026-06-11T16:43:00Z",
-    "domain": "commons.wikimedia.org",
-    "stream": "mediawiki.recentchange",
-    "topic": "eqiad.mediawiki.recentchange",
-    "partition": 0,
-    "offset": 6232534000
-  },
-  "id": 998877665,
-  "type": "categorize",
-  "namespace": 14,
-  "title": "Category:Photos by RudolphousBot",
-  "comment": "File:DESERT_SCIMITAR.jpg added to category",
-  "timestamp": 1781196180,
-  "user": "RudolphousBot",
-  "bot": true,
-  "server_url": "https://commons.wikimedia.org",
-  "server_name": "commons.wikimedia.org",
-  "server_script_path": "/w",
-  "wiki": "commonswiki"
-}
+DROP if meta.id is null
+DROP if meta.dt is null or unparseable
+DROP if meta.domain == "canary"
+KEEP all 5 change types: edit, new, categorize, log, external
 ```
-
-**type = log (delete)**
-```json
-{
-  "$schema": "/mediawiki/recentchange/1.0.0",
-  "meta": {
-    "id": "b1c2d3e4-f5a6-b7c8-d9e0-f1a2b3c4d5e6",
-    "dt": "2026-06-11T16:44:00Z",
-    "domain": "en.wikipedia.org",
-    "stream": "mediawiki.recentchange",
-    "topic": "eqiad.mediawiki.recentchange",
-    "partition": 0,
-    "offset": 6232534200
-  },
-  "id": 112233445,
-  "type": "log",
-  "namespace": -1,
-  "title": "Fake News Article 2026",
-  "comment": "Spam: blatant advertising",
-  "timestamp": 1781196240,
-  "user": "Fastily",
-  "bot": false,
-  "server_url": "https://en.wikipedia.org",
-  "server_name": "en.wikipedia.org",
-  "server_script_path": "/w",
-  "wiki": "enwiki",
-  "log_id": 98765432,
-  "log_type": "delete",
-  "log_action": "delete",
-  "log_params": { "suppressedrevs": false },
-  "log_action_comment": "Deleted [[Fake News Article 2026]]: Spam: blatant advertising"
-}
-```
-
-**type = log (block)**
-```json
-{
-  "$schema": "/mediawiki/recentchange/1.0.0",
-  "meta": {
-    "id": "c2d3e4f5-a6b7-c8d9-e0f1-a2b3c4d5e6f7",
-    "dt": "2026-06-11T16:45:00Z",
-    "domain": "en.wikipedia.org",
-    "stream": "mediawiki.recentchange",
-    "topic": "eqiad.mediawiki.recentchange",
-    "partition": 0,
-    "offset": 6232534400
-  },
-  "id": 112233446,
-  "type": "log",
-  "namespace": -1,
-  "title": "User:Vandal1234",
-  "comment": "Persistent vandalism",
-  "timestamp": 1781196300,
-  "user": "ClueBot NG",
-  "bot": true,
-  "server_url": "https://en.wikipedia.org",
-  "server_name": "en.wikipedia.org",
-  "server_script_path": "/w",
-  "wiki": "enwiki",
-  "log_id": 98765433,
-  "log_type": "block",
-  "log_action": "block",
-  "log_params": { "5::duration": "31 hours", "6::flags": "nocreate,noemail" },
-  "log_action_comment": "Blocked [[User:Vandal1234]] with expiry 31 hours (nocreate, noemail)"
-}
-```
-
-Known `log_type` values: `delete` · `restore` · `block` · `unblock` · `protect` · `upload` · `move` · `import` · `patrol` · `rights` · `newusers` · `merge` · `suppress` · `tag`
 
 ---
 
-## Contract 2 — Kinesis Normalized Event
+## Contract 2 — Kinesis Normalized Envelope
 
 **Producer:** ECS Fargate Collector  
-**Consumer:** Realtime Processor Lambda, Alert Processor Lambda
+**Consumers:** Realtime Processor Lambda, Alert Processor Lambda, Kinesis Firehose
 
-The Collector transforms every raw Wikimedia event into this unified, null-safe contract before sending to Kinesis.
+The Collector transforms every raw Wikimedia event into a unified, null-safe envelope before sending it to Kinesis.
+
+The envelope intentionally contains both:
+
+1. `payload` — stable normalized fields used by real-time consumers.
+2. `raw_event` — original Wikimedia JSON object exactly as received from the SSE `data:` line.
+
+This gives the project a stable real-time contract while preserving source fidelity in S3 Bronze.
 
 > `event_id` is built from `meta.id` (UUID), not from `id` (rcid).  
 > The rcid is per-wiki only — two wikis can emit the same rcid.  
 > `meta.id` is globally unique across the entire stream.
 
-> The Kinesis `PartitionKey` is `hash(meta.id)`. It is a PutRecords **call parameter**, never a JSON field.
+> The Kinesis `PartitionKey` is `hash(meta.id)`. It is a PutRecords call parameter, not a JSON field.
 
 ### Schema
 
 ```json
 {
-  "event_id":       "wikimedia-{meta.id}",
-  "event_type":     "wiki.recentchange",
-  "event_version":  "1.0",
-  "source":         "wikimedia.eventstreams",
-  "occurred_at":    "{meta.dt}",
-  "ingested_at":    "{ISO8601 — collector ingestion time}",
+  "event_id": "wikimedia-{meta.id}",
+  "event_type": "wiki.recentchange",
+  "event_version": "1.0",
+  "source": "wikimedia.eventstreams",
+  "occurred_at": "{meta.dt}",
+  "ingested_at": "{ISO8601 collector ingestion time}",
   "correlation_id": "{UUID generated by collector}",
   "payload": {
-    "wikimedia_recentchange_id": "{id — integer, not unique cross-wiki}",
-    "wiki":          "{wiki}",
-    "domain":        "{meta.domain}",
-    "change_type":   "{type}",
-    "namespace":     "{namespace}",
-    "title":         "{title}",
-    "title_url":     "{title_url if present, else null}",
-    "user":          "{user}",
-    "user_is_bot":   "{bot — boolean}",
-    "is_minor":      "{minor if present, else null}",
-    "is_patrolled":  "{patrolled if present, else null}",
-    "old_length":    "{length.old if present, else null}",
-    "new_length":    "{length.new if present, else null}",
-    "delta_bytes":   "{new_length - old_length if both present, else null}",
-    "revision_old":  "{revision.old if present, else null}",
-    "revision_new":  "{revision.new if present, else null}",
-    "notify_url":    "{notify_url if present, else null}",
-    "log_type":      "{log_type if present, else null}",
-    "log_action":    "{log_action if present, else null}",
-    "log_params":    "{log_params if present, else null}"
+    "wikimedia_recentchange_id": "{id integer, not unique cross-wiki}",
+    "wiki": "{wiki lowercase}",
+    "domain": "{meta.domain}",
+    "change_type": "{type}",
+    "namespace": "{namespace}",
+    "title": "{title}",
+    "title_url": "{title_url if present, else null}",
+    "user": "{user}",
+    "user_is_bot": "{bot boolean}",
+    "is_minor": "{minor if present, else null}",
+    "is_patrolled": "{patrolled if present, else null}",
+    "old_length": "{length.old if present, else null}",
+    "new_length": "{length.new if present, else null}",
+    "delta_bytes": "{new_length - old_length if both present, else null}",
+    "revision_old": "{revision.old if present, else null}",
+    "revision_new": "{revision.new if present, else null}",
+    "change_url": "{best-effort URL to the change, else null}",
+    "raw_notify_url": "{notify_url from raw event if present, else null}",
+    "log_type": "{log_type if present, else null}",
+    "log_action": "{log_action if present, else null}",
+    "log_params": "{log_params if present, else null}"
+  },
+  "raw_event": {
+    "...": "original Wikimedia JSON exactly as received from SSE"
   }
 }
 ```
@@ -259,32 +153,33 @@ The Collector transforms every raw Wikimedia event into this unified, null-safe 
 
 | Normalized field | Source field | Rule |
 |---|---|---|
-| `event_id` | `meta.id` | `"wikimedia-" + meta.id` — globally unique |
+| `event_id` | `meta.id` | `"wikimedia-" + meta.id` |
 | `occurred_at` | `meta.dt` | ISO8601 |
 | `wikimedia_recentchange_id` | `id` | integer, per-wiki only |
 | `wiki` | `wiki` | lowercase |
 | `domain` | `meta.domain` | |
-| `change_type` | `type` | one of: edit · new · categorize · log · external |
-| `namespace` | `namespace` | -1 for log, 14 for categorize, 0 for articles |
-| `title` | `title` | |
+| `change_type` | `type` | `edit`, `new`, `categorize`, `log`, `external` |
+| `namespace` | `namespace` | may be -1, 0, 14, etc. |
+| `title` | `title` | null-safe |
 | `title_url` | `title_url` | null if absent |
-| `user` | `user` | |
+| `user` | `user` | null-safe |
 | `user_is_bot` | `bot` | cast boolean |
-| `is_minor` | `minor` | null for non-edit types |
+| `is_minor` | `minor` | null for non-edit/non-new types |
 | `is_patrolled` | `patrolled` | null if field absent |
-| `old_length` | `length.old` | null for categorize / log / external |
-| `new_length` | `length.new` | null for categorize / log / external |
+| `old_length` | `length.old` | null if absent |
+| `new_length` | `length.new` | null if absent |
 | `delta_bytes` | computed | `new_length - old_length`; null if either is null |
-| `revision_old` | `revision.old` | null for non-edit types |
-| `revision_new` | `revision.new` | null for non-edit types |
-| `notify_url` | `notify_url` | null if absent |
+| `revision_old` | `revision.old` | null if absent |
+| `revision_new` | `revision.new` | null if absent |
+| `raw_notify_url` | `notify_url` | optional raw field, null if absent |
+| `change_url` | computed | `notify_url` OR diff URL from revision IDs OR `title_url` OR null |
 | `log_type` | `log_type` | null for non-log types |
 | `log_action` | `log_action` | null for non-log types |
 | `log_params` | `log_params` | null for non-log; may be array, object, or string |
+| `raw_event` | full event | original Wikimedia JSON object |
 
-### Concrete examples
+### Concrete example — edit event
 
-**edit event:**
 ```json
 {
   "event_id": "wikimedia-e195ebcf-e9ff-4179-9591-0d2384b96117",
@@ -311,95 +206,50 @@ The Collector transforms every raw Wikimedia event into this unified, null-safe 
     "delta_bytes": 23,
     "revision_old": 585514253,
     "revision_new": 586543834,
-    "notify_url": "https://commons.wikimedia.org/w/index.php?diff=586543834&oldid=585514253",
+    "change_url": "https://commons.wikimedia.org/w/index.php?diff=586543834&oldid=585514253",
+    "raw_notify_url": null,
     "log_type": null,
     "log_action": null,
     "log_params": null
-  }
-}
-```
-
-**categorize event:**
-```json
-{
-  "event_id": "wikimedia-a9b8c7d6-aaaa-bbbb-cccc-ddddeeeeffff",
-  "event_type": "wiki.recentchange",
-  "event_version": "1.0",
-  "source": "wikimedia.eventstreams",
-  "occurred_at": "2026-06-11T16:43:00Z",
-  "ingested_at": "2026-06-11T16:43:00.201Z",
-  "correlation_id": "8g4f3b2c-0d9e-5f6a-b7c8-d9e0f1a2b3c4",
-  "payload": {
-    "wikimedia_recentchange_id": 998877665,
-    "wiki": "commonswiki",
-    "domain": "commons.wikimedia.org",
-    "change_type": "categorize",
-    "namespace": 14,
-    "title": "Category:Photos by RudolphousBot",
-    "title_url": null,
+  },
+  "raw_event": {
+    "$schema": "/mediawiki/recentchange/1.0.0",
+    "meta": {
+      "id": "e195ebcf-e9ff-4179-9591-0d2384b96117",
+      "dt": "2026-06-11T16:41:05Z",
+      "domain": "commons.wikimedia.org",
+      "stream": "mediawiki.recentchange",
+      "topic": "eqiad.mediawiki.recentchange",
+      "partition": 0,
+      "offset": 6232533545
+    },
+    "id": 1754327016,
+    "type": "edit",
+    "namespace": 6,
+    "title": "File:DESERT SCIMITAR 130430-M-OC922-009.jpg",
     "user": "RudolphousBot",
-    "user_is_bot": true,
-    "is_minor": null,
-    "is_patrolled": null,
-    "old_length": null,
-    "new_length": null,
-    "delta_bytes": null,
-    "revision_old": null,
-    "revision_new": null,
-    "notify_url": null,
-    "log_type": null,
-    "log_action": null,
-    "log_params": null
-  }
-}
-```
-
-**log event (delete):**
-```json
-{
-  "event_id": "wikimedia-b1c2d3e4-f5a6-b7c8-d9e0-f1a2b3c4d5e6",
-  "event_type": "wiki.recentchange",
-  "event_version": "1.0",
-  "source": "wikimedia.eventstreams",
-  "occurred_at": "2026-06-11T16:44:00Z",
-  "ingested_at": "2026-06-11T16:44:00.089Z",
-  "correlation_id": "9h5g4c3d-1e0f-6a7b-c8d9-e0f1a2b3c4d5",
-  "payload": {
-    "wikimedia_recentchange_id": 112233445,
-    "wiki": "enwiki",
-    "domain": "en.wikipedia.org",
-    "change_type": "log",
-    "namespace": -1,
-    "title": "Fake News Article 2026",
-    "title_url": null,
-    "user": "Fastily",
-    "user_is_bot": false,
-    "is_minor": null,
-    "is_patrolled": null,
-    "old_length": null,
-    "new_length": null,
-    "delta_bytes": null,
-    "revision_old": null,
-    "revision_new": null,
-    "notify_url": null,
-    "log_type": "delete",
-    "log_action": "delete",
-    "log_params": { "suppressedrevs": false }
+    "bot": true,
+    "minor": true,
+    "patrolled": true,
+    "length": { "old": 1132, "new": 1155 },
+    "revision": { "old": 585514253, "new": 586543834 },
+    "server_url": "https://commons.wikimedia.org",
+    "server_script_path": "/w",
+    "wiki": "commonswiki"
   }
 }
 ```
 
 ---
 
-## Contract 3 — DynamoDB realtime_aggregates
+## Contract 3 — DynamoDB realtime_aggregates and alert_state
+
+### 3a — Global Activity (write-sharded)
 
 **Producer:** Realtime Processor Lambda  
 **Consumer:** Broadcaster Lambda
 
-All writes use atomic `UpdateItem ADD` — no read-modify-write, race-condition safe.  
-TTL = `window_start + 7200` (2 hours). Items auto-expire after the historical analytics path takes over.
-
-### 3a — Global Activity (write-sharded)
+All writes use atomic `UpdateItem ADD`.
 
 ```json
 {
@@ -442,7 +292,7 @@ Broadcaster reads `SHARD#0` through `SHARD#9` and sums all counters.
 
 ### 3c — Top Pages (namespace = 0 only)
 
-Log events (namespace = -1) and categorize events (namespace = 14) are excluded.
+Log events and categorize events are excluded.
 
 ```json
 {
@@ -460,8 +310,6 @@ Log events (namespace = -1) and categorize events (namespace = 14) are excluded.
 
 ### 3d — Change Type Distribution
 
-All five types tracked: `edit` · `new` · `categorize` · `log` · `external`
-
 ```json
 {
   "PK": "METRIC#CHANGE_TYPE#TYPE#edit",
@@ -473,8 +321,6 @@ All five types tracked: `edit` · `new` · `categorize` · `log` · `external`
 ```
 
 ### 3e — Namespace Distribution
-
-Namespace -1 (log events) is a valid value and is tracked.
 
 ```json
 {
@@ -488,19 +334,22 @@ Namespace -1 (log events) is a valid value and is tracked.
 
 Common namespace values: `-1` (Special/log) · `0` (Article) · `1` (Talk) · `2` (User) · `4` (Project) · `6` (File) · `10` (Template) · `14` (Category)
 
-
 ### 3f — Alert Processor State
 
-**Producer:** Alert Processor Lambda
-**Consumer:** Alert Processor Lambda (self — read on each invocation)
+**Producer:** Alert Processor Lambda  
+**Consumer:** Alert Processor Lambda
 
-One item per minute per tracked scope (global + per-wiki).
-The Lambda writes the current minute count, then reads the last
-30 items to compute the rolling average and z_score.
+One item per minute per tracked scope.
 
-TTL = `minute_start + 2100` (35 minutes).
-Keeps 35 minutes of history — 5 minutes of margin beyond the 30-minute
-rolling window. Items older than 35 minutes are auto-deleted by DynamoDB.
+```
+PK = ALERT#GLOBAL
+PK = ALERT#WIKI#{wiki}
+PK = ALERT#LOG_TYPE#{log_type}
+SK = MINUTE#{yyyy-MM-ddTHH:mm}
+TTL = minute_start + 2100 seconds
+```
+
+Writes must use `UpdateItem ADD`, not `PutItem`, because multiple Lambda invocations can process different Kinesis batches for the same minute.
 
 ```json
 {
@@ -508,45 +357,27 @@ rolling window. Items older than 35 minutes are auto-deleted by DynamoDB.
   "SK": "MINUTE#2026-06-11T16:44",
   "minute_start": "2026-06-11T16:44:00Z",
   "event_count": 1240,
-  "ttl": 1781198340
-}
-```
-
-Per-wiki scope (used for wiki-level spike detection):
-
-```json
-{
-  "PK": "ALERT#WIKI#enwiki",
-  "SK": "MINUTE#2026-06-11T16:44",
-  "minute_start": "2026-06-11T16:44:00Z",
-  "event_count": 380,
+  "log_count": 30,
+  "delete_count": 12,
+  "block_count": 4,
   "ttl": 1781198340
 }
 ```
 
 Access patterns:
 ```
-Write (each invocation) : PutItem PK=ALERT#GLOBAL SK=MINUTE#{current_minute}
-Read  (each invocation) : Query PK=ALERT#GLOBAL SK between {now-30min} and {now}
-                          → returns up to 30 items → compute z_score
+Write : UpdateItem ADD event_count, log_count, delete_count, block_count
+Read  : Query PK=ALERT#GLOBAL SK between now-30min and now
+Read  : Query PK=ALERT#LOG_TYPE#delete SK between now-5min and now
+Read  : Query PK=ALERT#LOG_TYPE#block  SK between now-5min and now
 ```
-
-Known limitation (V1):
-```
-If two Lambda invocations process the same minute concurrently,
-the last write wins (PutItem overwrites). This is acceptable because
-both invocations process the same Kinesis batch for the same window
-and will produce the same event_count value.
-```
-
-
 
 ---
 
 ## Contract 4 — DynamoDB websocket_connections
 
 **Producer:** Connect Handler Lambda  
-**Consumer:** Broadcaster Lambda, Disconnect Handler Lambda
+**Consumers:** Broadcaster Lambda, Disconnect Handler Lambda
 
 ```json
 {
@@ -558,7 +389,19 @@ and will produce the same event_count value.
 }
 ```
 
-TTL = `connected_at + 7200` (2 hours). Protects against ghost connections when `$disconnect` is never fired.
+TTL = `connected_at + 7200` seconds.
+
+V1 access pattern:
+```
+Broadcaster scans websocket_connections and filters topics in Lambda.
+```
+
+V2 scale pattern:
+```
+websocket_subscriptions:
+PK = TOPIC#{topic}
+SK = CONNECTION#{connection_id}
+```
 
 ---
 
@@ -570,18 +413,27 @@ TTL = `connected_at + 7200` (2 hours). Protects against ghost connections when `
 ```json
 {
   "message_type": "aggregates.updated",
-  "window": "2026-06-11T16:44:00Z",
-  "topics": ["global", "top_pages", "wiki:enwiki", "wiki:commonswiki"],
-  "created_at": "2026-06-11T16:44:05.123Z"
+  "aggregation_window": "2026-06-11T16:44:00Z",
+  "broadcast_window": "2026-06-11T16:44:10Z",
+  "created_at": "2026-06-11T16:44:10.123Z"
 }
 ```
 
 ```
-MessageGroupId        = "broadcast-signal"
-MessageDeduplicationId = "aggregates-window-2026-06-11T16:44"
+MessageGroupId         = "broadcast-signal"
+MessageDeduplicationId = "broadcast-window-2026-06-11T16:44:10Z"
 ```
 
-Deduplication ensures only one broadcast per time window, regardless of how many Lambda invocations write to the same window concurrently.
+Definitions:
+```
+aggregation_window = 1-minute DynamoDB counter window
+broadcast_window   = 5-second dashboard refresh window
+```
+
+The Realtime Processor updates the current minute counters continuously.  
+The Broadcaster pushes a live snapshot every 5 seconds.
+
+The SQS message intentionally does not carry a `topics` list. The Broadcaster derives required topics by scanning current WebSocket subscriptions.
 
 ---
 
@@ -595,27 +447,47 @@ Deduplication ensures only one broadcast per time window, regardless of how many
   "type": "stats.update",
   "topic": "global",
   "timestamp": "2026-06-11T16:44:10Z",
-  "window": "2026-06-11T16:44:00Z",
+  "aggregation_window": "2026-06-11T16:44:00Z",
+  "broadcast_window": "2026-06-11T16:44:10Z",
+  "is_partial_window": true,
   "data": {
-    "events_per_minute": 1240,
+    "current_minute_events_so_far": 220,
+    "events_last_5s": 120,
+    "estimated_events_per_minute": 1440,
+    "last_completed_minute_events": 1240,
     "bot_ratio": 0.42,
     "human_ratio": 0.58,
     "top_wikis": [
       { "wiki": "commonswiki", "count": 320 },
-      { "wiki": "enwiki",      "count": 240 },
-      { "wiki": "wikidatawiki","count": 210 }
+      { "wiki": "enwiki", "count": 240 },
+      { "wiki": "wikidatawiki", "count": 210 }
     ],
     "change_types": {
-      "edit": 760, "categorize": 390, "new": 70, "log": 20, "external": 0
+      "edit": 760,
+      "categorize": 390,
+      "new": 70,
+      "log": 20,
+      "external": 0
     },
     "top_pages": [
       { "wiki": "enwiki", "title": "Scale AI", "count": 6, "url": "https://en.wikipedia.org/wiki/Scale_AI" }
     ],
     "namespace_distribution": {
-      "0": 620, "6": 210, "14": 390, "-1": 20
+      "0": 620,
+      "6": 210,
+      "14": 390,
+      "-1": 20
     }
   }
 }
+```
+
+Dashboard interpretation:
+```
+current_minute_events_so_far  → monotonically increases during the minute
+events_last_5s                → true live fluctuation signal
+estimated_events_per_minute   → events_last_5s * 12
+last_completed_minute_events  → stable completed-minute reference
 ```
 
 ---
@@ -639,15 +511,15 @@ Valid topics: `global` · `top_pages` · `wiki:{any_valid_wiki_code}`
 ## Contract 8 — WebSocket acknowledgements (server → client)
 
 ```json
-{ "type": "subscription.ack", "topic": "wiki:frwiki", "status": "subscribed"   }
-{ "type": "subscription.ack", "topic": "wiki:enwiki",  "status": "unsubscribed" }
-{ "type": "error", "message": "Unsupported topic"  }
-{ "type": "error", "message": "Invalid action"     }
+{ "type": "subscription.ack", "topic": "wiki:frwiki", "status": "subscribed" }
+{ "type": "subscription.ack", "topic": "wiki:enwiki", "status": "unsubscribed" }
+{ "type": "error", "message": "Unsupported topic" }
+{ "type": "error", "message": "Invalid action" }
 ```
 
 ---
 
-## Contract 9 — S3 Bronze (raw archive)
+## Contract 9 — S3 Bronze (normalized envelope archive with raw_event)
 
 **Producer:** Kinesis Firehose  
 **Consumer:** Glue ETL bronze→silver
@@ -657,51 +529,56 @@ Path    : s3://bucket/bronze/wikimedia/recentchange/
           year=2026/month=06/day=11/hour=16/
           wikimedia-recentchange-2026-06-11-16-05-00-{uuid}.json.gz
 
-Format  : JSON Lines, one raw Wikimedia event per line, GZIP compressed
-Schema  : raw Wikimedia — no transformation, all fields preserved as-is
-Latency : available in S3 within 5 minutes of ingestion (Firehose buffer: 64MB or 300s)
-Purpose : immutable archive, schema recovery, event replay
+Format  : JSON Lines, one Kinesis normalized envelope per line, GZIP compressed
+Schema  : Contract 2 — includes normalized payload and embedded raw_event
+Latency : available in S3 within 5 minutes of ingestion
+Purpose : immutable source-fidelity archive, downstream replay, schema recovery
 ```
+
+Bronze is not raw-only. It stores the normalized envelope exactly as sent to Kinesis. Source fidelity is preserved because the original Wikimedia object is embedded in `raw_event`.
 
 ---
 
 ## Contract 10 — S3 Silver (cleaned Parquet)
 
 **Producer:** Glue ETL bronze→silver  
-**Consumer:** Glue ETL silver→gold, Athena
+**Consumers:** Glue ETL silver→gold, Athena
 
 ```
 Path    : s3://bucket/silver/wikimedia/recentchange/
           ingestion_date=2026-06-11/part-00000.parquet
 
 Format  : Apache Parquet, SNAPPY compression
-Latency : available ~1h after ingestion (hourly Glue job)
+Latency : available ~1h after ingestion
+Source  : Bronze Contract 2 envelope, mainly payload fields
 ```
 
 Schema:
 ```
-event_id              STRING    NOT NULL  -- "wikimedia-{meta.id}"
-occurred_at           TIMESTAMP NOT NULL  -- parsed from meta.dt
-ingestion_date        DATE      NOT NULL  -- partition key
+event_id              STRING    NOT NULL
+occurred_at           TIMESTAMP NOT NULL
+ingestion_date        DATE      NOT NULL
 wiki                  STRING    NOT NULL
 domain                STRING
-change_type           STRING              -- edit|new|categorize|log|external
-namespace             INT                 -- -1 for log, 14 for categorize
+change_type           STRING
+namespace             INT
 title                 STRING
-title_url             STRING              -- null if absent
+title_url             STRING
 user                  STRING
 user_is_bot           BOOLEAN
-is_minor              BOOLEAN             -- null for non-edit/new
-is_patrolled          BOOLEAN             -- null if field absent
-old_length            INT                 -- null for categorize/log/external
-new_length            INT                 -- null for categorize/log/external
-delta_bytes           INT                 -- null if either length is null
-revision_old          BIGINT              -- null for non-edit/new
-revision_new          BIGINT              -- null for non-edit/new
-log_type              STRING              -- null for non-log
-log_action            STRING              -- null for non-log
-log_params            STRING              -- JSON string; null if absent
-wikimedia_rcid        BIGINT              -- original id field (not unique cross-wiki)
+is_minor              BOOLEAN
+is_patrolled          BOOLEAN
+old_length            INT
+new_length            INT
+delta_bytes           INT
+revision_old          BIGINT
+revision_new          BIGINT
+change_url            STRING
+raw_notify_url        STRING
+log_type              STRING
+log_action            STRING
+log_params            STRING
+wikimedia_rcid        BIGINT
 ```
 
 ---
@@ -709,7 +586,7 @@ wikimedia_rcid        BIGINT              -- original id field (not unique cross
 ## Contract 11 — S3 Gold (pre-aggregated Parquet)
 
 **Producer:** Glue ETL silver→gold  
-**Consumer:** Athena, QuickSight
+**Consumers:** Athena, QuickSight
 
 ### top_wikis_by_hour
 ```
@@ -754,23 +631,41 @@ Spike  : is_spike = true when z_score > 2.0
 
 ## Critical filtering rules
 
-These rules follow directly from the real Wikimedia event structure.
+**Collector**
+```
+DROP   if meta.id is null
+DROP   if meta.dt is null or unparseable
+DROP   if meta.domain == "canary"
+KEEP   all five change types
+EMBED  raw_event exactly as received
+```
 
 **Realtime Processor**
 ```
-top_pages     → namespace = 0 only (excludes log=-1, categorize=14)
+top_pages     → namespace = 0 only
 wiki_activity → all types and namespaces included
-change_type   → all 5 types counted: edit, new, categorize, log, external
+change_type   → all 5 types counted
 bot_ratio     → user_is_bot applied across all types
+```
+
+**Alert Processor**
+```
+WRITE alert_state with UpdateItem ADD
+TRACK event_count, log_count, delete_count, block_count
+QUERY 30-minute rolling window for global/wiki spikes
+QUERY 5-minute rolling window for delete/block bursts
 ```
 
 **Glue Silver ETL**
 ```
-DROP   if meta.id is null
-DROP   if meta.dt is null or unparseable
+READ   Bronze Contract 2 envelope
+DROP   if event_id is null
+DROP   if occurred_at is null or unparseable
 KEEP   all 5 change_types
-CAST   bot → boolean (never null in the stream)
-CAST   minor → boolean, null if field absent
+CAST   user_is_bot → boolean
+CAST   is_minor → boolean, null if absent
 COMPUTE delta_bytes only when both lengths are non-null
-SERIALIZE log_params as JSON string (type varies: array | object | string)
+SERIALIZE log_params as JSON string
+SELECT known payload columns only
+PRESERVE raw_event in Bronze; Silver does not need to carry the full raw object by default
 ```

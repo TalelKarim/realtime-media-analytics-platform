@@ -1,6 +1,6 @@
 # Realtime Media Analytics Platform on AWS
 
-AWS-native streaming platform that ingests live Wikimedia activity, processes it in real time, pushes aggregated metrics to a live WebSocket dashboard, and archives everything in a Medallion Data Lake for historical analysis.
+AWS-native streaming platform that ingests live Wikimedia activity, processes it in real time, pushes aggregated metrics to a live WebSocket dashboard, and archives a source-fidelity event envelope in a Medallion Data Lake for historical analysis.
 
 ---
 
@@ -15,7 +15,7 @@ AWS-native streaming platform that ingests live Wikimedia activity, processes it
                                       ▼
                        ┌──────────────────────────────┐
                        │   ECS Fargate Collector       │
-                       │   parse · normalize · batch   │
+                       │ parse · normalize · raw_event │
                        └──────────────┬───────────────┘
                                       │ PutRecords
                                       ▼
@@ -36,16 +36,17 @@ AWS-native streaming platform that ingests live Wikimedia activity, processes it
  │ DynamoDB           │    │ S3 Data Lake        │    │ SNS Topic           │
  │ realtime_aggregates│    │ bronze/silver/gold  │    │ alerts              │
  │ websocket_conns    │    └──────────┬──────────┘    └─────────────────────┘
+ │ alert_state        │               │
+ └────────┬───────────┘               ▼
+          ▼                ┌─────────────────────┐
+ ┌────────────────────┐    │ Glue Data Catalog   │
+ │ SQS FIFO           │    └──────────┬──────────┘
+ │ broadcast signal   │               │
+ └────────┬───────────┘               ▼
+          ▼                ┌─────────────────────┐
+ ┌────────────────────┐    │ Athena              │
+ │ Broadcaster Lambda │    └──────────┬──────────┘
  └────────┬───────────┘               │
-          ▼                           ▼
- ┌────────────────────┐    ┌─────────────────────┐
- │ SQS FIFO           │    │ Glue Data Catalog   │
- │ broadcast signal   │    └──────────┬──────────┘
- └────────┬───────────┘               │
-          ▼                           ▼
- ┌────────────────────┐    ┌─────────────────────┐
- │ Broadcaster Lambda │    │ Athena              │
- └────────┬───────────┘    └──────────┬──────────┘
           ▼                           ▼
  ┌────────────────────┐    ┌─────────────────────┐
  │ API Gateway        │    │ QuickSight          │
@@ -65,10 +66,12 @@ AWS-native streaming platform that ingests live Wikimedia activity, processes it
 | Capability | Technology |
 |---|---|
 | Ingest live Wikimedia SSE stream | ECS Fargate Collector |
+| Normalize events while preserving source fidelity | Normalized envelope + embedded `raw_event` |
 | Fan-out to 3 consumers | Kinesis Data Streams |
-| Real-time aggregation | Lambda + DynamoDB (write-sharded) |
-| Live dashboard push | SQS FIFO + Lambda Broadcaster + API Gateway WebSocket |
-| Spike alerting | Lambda + SNS |
+| Real-time aggregation | Lambda + DynamoDB atomic counters and write sharding |
+| Live dashboard push | SQS FIFO 5-second broadcast signal + Lambda Broadcaster + API Gateway WebSocket |
+| WebSocket subscription tracking | DynamoDB `websocket_connections` with V1 Scan + Lambda-side topic filtering |
+| Spike alerting | Lambda + DynamoDB `alert_state` + SNS |
 | Historical archive | Firehose + S3 Bronze/Silver/Gold |
 | SQL analytics | Glue + Athena + QuickSight |
 | Infrastructure as Code | Terraform + Terraform Cloud |
@@ -79,13 +82,16 @@ AWS-native streaming platform that ingests live Wikimedia activity, processes it
 
 - Real-time event ingestion over SSE
 - Event-driven fan-out with Kinesis
+- Stable normalized event contract with embedded raw source event
 - Write sharding for DynamoDB hot partition mitigation
+- Atomic counters with `UpdateItem ADD`
 - Serverless broadcasting via WebSocket
+- SQS FIFO deduplication by short broadcast windows
 - Medallion Data Lake (Bronze / Silver / Gold)
 - Partition projection on Athena
 - Observability with CloudWatch custom metrics and alarms
 - IAM least-privilege per component
-- Encryption at rest and in transit (KMS)
+- Encryption at rest and in transit with customer-managed KMS keys
 
 ---
 
@@ -104,17 +110,20 @@ Official schema:
 https://github.com/wikimedia/mediawiki-event-schemas/blob/master/jsonschema/mediawiki/recentchange/current.yaml
 ```
 
+The raw Wikimedia event is the JSON object received in the SSE `data:` line.
+The Collector preserves that object under `raw_event` while also building a stable normalized `payload`.
+
 ---
 
 ## Dev Environment — Cost Control & Sampling
 
-Running this platform at full throughput (1000 events/sec) for 12 hours costs approximately **$200**, driven almost entirely by DynamoDB write volume (~157M WRUs).
+Running this platform at full throughput (1000 events/sec) for 12 hours can be expensive, driven mostly by DynamoDB write volume and downstream processing.
 
 To make development and testing affordable, the Collector supports a configurable **sampling rate** via environment variable:
 
 ```
 COLLECTOR_SAMPLE_RATE=0.10   # dev  → 10% of the stream (~100 events/sec)
-COLLECTOR_SAMPLE_RATE=1.0    # prod → full throughput (1000 events/sec)
+COLLECTOR_SAMPLE_RATE=1.0    # prod → full throughput (~1000 events/sec)
 ```
 
 ### How sampling works
@@ -122,21 +131,26 @@ COLLECTOR_SAMPLE_RATE=1.0    # prod → full throughput (1000 events/sec)
 ```python
 import os, random
 
-SAMPLE_RATE = float(os.environ.get('COLLECTOR_SAMPLE_RATE', '1.0'))
+SAMPLE_RATE = float(os.environ.get("COLLECTOR_SAMPLE_RATE", "1.0"))
 
-def process_event(event):
+def process_event(raw_event):
+    if raw_event.get("meta", {}).get("domain") == "canary":
+        return  # drop Wikimedia canary events
+
     if random.random() > SAMPLE_RATE:
-        return  # drop this event
-    send_to_kinesis(normalize(event))
+        return  # drop this event in dev/test mode
+
+    envelope = build_normalized_envelope(raw_event)  # payload + raw_event
+    send_to_kinesis(envelope)
 ```
 
 ### Cost comparison
 
 | Mode | Events/sec | Volume (12h) | Estimated cost |
-|---|---|---|---|
-| Production | 1 000 | ~43M events / 26 GB | ~$200 |
-| Dev (10% sampling) | 100 | ~4.3M events / 2.6 GB | ~$20 |
-| Dev (1% sampling) | 10 | ~430K events / 260 MB | ~$2 |
+|---|---:|---:|---:|
+| Production | 1 000 | ~43M events | high |
+| Dev (10% sampling) | 100 | ~4.3M events | moderate |
+| Dev (1% sampling) | 10 | ~430K events | low |
 
 ### Important note on sampled metrics
 
@@ -158,6 +172,7 @@ Sampling only affects ingestion volume — not the system design.
 | `documentation/data-contracts.md` | All data contracts across the pipeline (source → Kinesis → DynamoDB → WebSocket → S3 → Gold) |
 | `documentation/sequence-diagrams.md` | All sequence diagrams in Mermaid format |
 | `documentation/historical-analytics.md` | Data Lake architecture, Glue ETL, Athena queries, QuickSight dashboards |
+| `documentation/archi.md` | C4 and end-to-end architecture diagrams |
 
 ---
 
@@ -171,6 +186,7 @@ realtime-media-analytics-platform/
 │   ├── data-contracts.md
 │   ├── sequence-diagrams.md
 │   ├── historical-analytics.md
+│   ├── archi.md
 │   └── adr/
 │       ├── ADR-001-fargate-collector.md
 │       ├── ADR-002-kinesis-backbone.md
@@ -219,11 +235,11 @@ realtime-media-analytics-platform/
 
 ## AWS services
 
-**Real-time path**
+**Real-time path**  
 ECS Fargate · Kinesis Data Streams · Lambda · DynamoDB · SQS FIFO · API Gateway WebSocket · SNS · CloudWatch · IAM · KMS
 
-**Historical path**
+**Historical path**  
 Kinesis Firehose · S3 · Glue · Athena · QuickSight
 
-**Infrastructure**
+**Infrastructure**  
 Terraform · Terraform Cloud · GitHub Actions

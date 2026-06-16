@@ -21,37 +21,39 @@ sequenceDiagram
   participant AGW as API Gateway WebSocket
   participant DSH as Frontend Dashboard
 
-  Wiki->>Col: SSE event (edit / new / categorize / log / external)
-  Note over Col: Parse JSON · validate meta.id + meta.dt<br/>Normalize to null-safe contract<br/>Buffer in memory
+  Wiki->>Col: SSE event data JSON
+  Note over Col: Parse JSON · validate meta.id + meta.dt<br/>Drop meta.domain == canary<br/>Build normalized envelope<br/>Embed original raw_event
 
   Col->>Col: 100 events buffered OR 2 seconds elapsed
-  Col->>KDS: PutRecords — PartitionKey = hash(meta.id)
+  Col->>KDS: PutRecords envelope<br/>PartitionKey = hash(meta.id)
   Note over KDS: Fan-out to 3 independent consumers
 
   KDS->>RTP: Trigger Lambda with event batch
-  loop For each event in batch
-    RTP->>RTP: Compute window key (1-min bucket)<br/>Compute shard_id = hash(event_id) % 10
+  loop For each envelope in batch
+    RTP->>RTP: Read payload<br/>Compute aggregation_window = 1-min bucket<br/>Compute shard_id = hash(event_id) % 10
     RTP->>DDB: UpdateItem ADD counters<br/>METRIC#GLOBAL_ACTIVITY#SHARD#{shard_id} / WINDOW#{minute}
     RTP->>DDB: UpdateItem ADD counters<br/>METRIC#WIKI_ACTIVITY#WIKI#{wiki} / WINDOW#{minute}
     alt namespace == 0
       RTP->>DDB: UpdateItem ADD events_count<br/>METRIC#TOP_PAGES#WIKI#{wiki} / WINDOW#{minute}#TITLE#{title}
     end
     RTP->>DDB: UpdateItem ADD events_count<br/>METRIC#CHANGE_TYPE#TYPE#{type} / WINDOW#{minute}
+    RTP->>DDB: UpdateItem ADD events_count<br/>METRIC#NAMESPACE#NS#{namespace} / WINDOW#{minute}
   end
 
-  RTP->>SQS: SendMessage<br/>MessageDeduplicationId = aggregates-window-{minute}
-  Note over SQS: Dedup: 1 message per window<br/>regardless of Lambda invocation count
+  RTP->>SQS: SendMessage<br/>aggregation_window=minute<br/>broadcast_window=5-second bucket<br/>DedupId=broadcast-window-{broadcast_window}
+  Note over SQS: Dedup: 1 broadcast trigger per 5 seconds
 
   SQS->>BRD: Trigger Broadcaster Lambda
   loop For each shard 0..9
     BRD->>DDB: GetItem METRIC#GLOBAL_ACTIVITY#SHARD#{n}
   end
-  BRD->>BRD: Sum all shards → compute totals and bot_ratio
+  BRD->>BRD: Sum all shards<br/>Compute current_minute_events_so_far<br/>Compute events_last_5s and estimated_events_per_minute
 
-  BRD->>DBC: Query connections subscribed to relevant topics
-  DBC-->>BRD: List of active connectionIds
+  BRD->>DBC: Scan active websocket_connections
+  BRD->>BRD: Filter subscribed topics in Lambda
+  DBC-->>BRD: Active connection items
 
-  loop For each connectionId
+  loop For each matched connectionId
     BRD->>AGW: postToConnection(connectionId, stats.update)
     alt GoneException — client disconnected silently
       BRD->>DBC: DeleteItem connectionId
@@ -59,7 +61,7 @@ sequenceDiagram
   end
 
   AGW->>DSH: JSON stats.update message
-  DSH->>DSH: Update charts and KPIs
+  DSH->>DSH: Update KPIs and live charts
 ```
 
 ---
@@ -79,32 +81,30 @@ sequenceDiagram
 
   User->>AGW: WebSocket connect (wss://...)
   AGW->>CNX: Invoke $connect route (connectionId)
-  CNX->>DBC: PutItem — connection_id, connected_at, topics=["global"], ttl=now+2h
+  CNX->>DBC: PutItem connection_id, connected_at, topics=["global"], ttl=now+2h
   DBC-->>CNX: OK
   CNX-->>AGW: HTTP 200
   AGW-->>User: Connection established
 
-  Note over User,DBC: Client receives global stats by default
-
   User->>AGW: {"action":"subscribe","topic":"wiki:frwiki"}
   AGW->>DEF: Invoke $default (connectionId, body)
-  DEF->>DBC: UpdateItem — append "wiki:frwiki" to topics list
+  DEF->>DBC: UpdateItem append "wiki:frwiki" to topics list
   DBC-->>DEF: OK
-  DEF->>AGW: postToConnection → subscription.ack
-  AGW-->>User: {"type":"subscription.ack","topic":"wiki:frwiki","status":"subscribed"}
+  DEF->>AGW: postToConnection subscription.ack
+  AGW-->>User: subscription.ack
 
-  Note over BRD,User: Next broadcast cycle triggers
+  Note over BRD,User: Next 5-second broadcast cycle
 
-  BRD->>DBC: Query connections where topics contains "wiki:frwiki"
-  DBC-->>BRD: [connectionId, ...]
+  BRD->>DBC: Scan active websocket_connections
+  BRD->>BRD: Filter connections whose topics contain "wiki:frwiki"
   BRD->>AGW: postToConnection(connectionId, stats.update for wiki:frwiki)
-  AGW-->>User: {"type":"stats.update","topic":"wiki:frwiki","data":{...}}
+  AGW-->>User: stats.update
 
   User->>AGW: Close tab or network drop
   AGW->>DCN: Invoke $disconnect (connectionId)
   DCN->>DBC: DeleteItem connectionId
   DBC-->>DCN: OK
-  Note over DBC: Connection removed — no more pushes for this client<br/>TTL covers cases where $disconnect is never fired
+  Note over DBC: TTL covers cases where $disconnect is never fired
 ```
 
 ---
@@ -125,30 +125,26 @@ sequenceDiagram
   participant ATH as Athena
   participant QS  as QuickSight
 
-  KDS->>FH: Stream events (parallel Kinesis consumer)
-  Note over FH: Buffer: 64 MB OR 300 seconds — whichever first
+  KDS->>FH: Stream normalized envelopes with embedded raw_event
+  Note over FH: Buffer: 64 MB OR 300 seconds
 
   FH->>S3B: JSON Lines batch (GZIP)<br/>bronze/wikimedia/recentchange/year=Y/month=M/day=D/hour=H/
-  Note over S3B: Raw · immutable · full fidelity<br/>All 5 event types · all fields preserved
+  Note over S3B: Immutable Contract 2 envelope<br/>payload + raw_event preserved
 
-  Note over GL1: Hourly Glue trigger — previous hour partition
   GL1->>S3B: Read bronze partition
-  GL1->>GL1: Drop null meta.id or meta.dt<br/>Cast bot→boolean, minor→boolean<br/>Compute delta_bytes (null-safe)<br/>Serialize log_params as JSON string<br/>Select known columns only — ignore unknowns
+  GL1->>GL1: Read envelope + payload<br/>Drop invalid event_id/occurred_at<br/>Cast types<br/>Serialize log_params<br/>Select known fields for Silver
   GL1->>S3S: Write Parquet (SNAPPY)<br/>silver/wikimedia/recentchange/ingestion_date=D/
   GL1->>CAT: Update partition metadata
 
-  Note over GL2: Hourly Glue trigger — after bronze→silver
-  GL2->>S3S: Read silver partition (same hour)
-  GL2->>GL2: Aggregate top_wikis_by_hour<br/>Aggregate bot_vs_human_by_hour<br/>Aggregate change_type_distribution<br/>Aggregate top_pages_by_day (namespace=0 only)<br/>Compute z_score for activity_spikes
+  GL2->>S3S: Read silver partition
+  GL2->>GL2: Aggregate top_wikis_by_hour<br/>bot_vs_human_by_hour<br/>change_type_distribution<br/>top_pages_by_day<br/>activity_spikes
   GL2->>S3G: Write 5 gold Parquet datasets
   GL2->>CAT: Update gold partition metadata
 
-  Note over ATH: Partition projection active — no MSCK REPAIR needed
-  ATH->>S3G: SQL scan (partition pruned, column pruned)
+  ATH->>S3G: SQL scan with partition pruning
   S3G-->>ATH: Parquet column data
   ATH-->>QS: Query result set
-
-  QS->>QS: SPICE incremental refresh (hourly)<br/>Rebuild historical dashboards
+  QS->>QS: SPICE incremental refresh
 ```
 
 ---
@@ -164,31 +160,27 @@ sequenceDiagram
   participant SNS as SNS Topic
   participant OPS as Platform Engineer
 
-  KDS->>ALP: Trigger Lambda - 1-minute batch
-  ALP->>ALP: Count events in batch
+  KDS->>ALP: Trigger Lambda with event batch
+  ALP->>ALP: Count event_count, log_count, delete_count, block_count
 
-  ALP->>DDB: PutItem ALERT#GLOBAL / MINUTE#{current_minute}
-  Note over DDB: event_count = len(batch), ttl = now + 2100
+  ALP->>DDB: UpdateItem ADD counters<br/>PK=ALERT#GLOBAL SK=MINUTE#{current_minute}
+  ALP->>DDB: UpdateItem ADD counters<br/>PK=ALERT#WIKI#{wiki} SK=MINUTE#{current_minute}
+  ALP->>DDB: UpdateItem ADD counters<br/>PK=ALERT#LOG_TYPE#delete/block SK=MINUTE#{current_minute}
 
-  ALP->>DDB: Query ALERT#GLOBAL SK between {now-30min} and {now}
-  DDB-->>ALP: Up to 30 items (last 30 minutes of counts)
+  ALP->>DDB: Query ALERT#GLOBAL last 30 minutes
+  DDB-->>ALP: Rolling event_count history
+  ALP->>ALP: Compute z_score
 
-  ALP->>ALP: Compute rolling_avg and rolling_stddev from 30 items
-  ALP->>ALP: z_score = (current_count - rolling_avg) / rolling_stddev
-
-  alt z_score > 2.0 - global spike detected
-    ALP->>SNS: Publish alert
-    Note over SNS: {"wiki":"global","events":1840,"avg":1240,"z_score":2.7}
-    SNS->>OPS: Email / SMS - "Activity spike: 1840 events/min vs avg 1240 (z=2.7)"
-  else log_type burst - moderation spike
-    Note over ALP: delete|block events > 3x normal in 5 min
-    ALP->>SNS: Publish moderation alert
-    SNS->>OPS: Email / SMS - "45 deletions in 5 min (normal: 12)"
+  alt z_score > 2.0
+    ALP->>SNS: Publish global/wiki activity spike alert
+    SNS->>OPS: Email / SMS notification
+  else delete/block burst > 3x normal over 5 min
+    ALP->>SNS: Publish moderation burst alert
+    SNS->>OPS: Email / SMS notification
   else normal activity
-    ALP->>ALP: No alert - state already persisted in DynamoDB
+    ALP->>ALP: No alert
   end
 ```
-
 
 ---
 
@@ -205,20 +197,19 @@ sequenceDiagram
 
   Col->>Wiki: SSE connection open
   Wiki-->>Col: Live stream of events
-  Col->>KDS: PutRecords (ongoing)
+  Col->>KDS: PutRecords ongoing
 
   Note over Col: Crash — OOM / network error / unhandled exception
 
   Col-xECS: Task exits (non-zero exit code)
   ECS->>CW: RunningTaskCount = 0
   CW->>CW: ALARM — ECS task count < 1
-  Note over ECS: Restart policy triggers immediately
 
   ECS->>Col: Launch new Fargate task
   Col->>Wiki: Reconnect SSE
-  Wiki-->>Col: Resume live stream
+  Wiki-->>Col: Resume live stream from current position
 
-  Note over KDS: Gap during downtime is not recoverable<br/>SSE is a live stream — no replay<br/>S3 bronze archive is unaffected (Firehose is independent)
+  Note over KDS: Gap during downtime is not recoverable<br/>SSE is a live stream — no replay<br/>Firehose is independent from Realtime Processor<br/>but not from Collector ingestion
 
   Col->>KDS: Resume PutRecords
   CW->>CW: OK — RunningTaskCount = 1
@@ -252,11 +243,10 @@ sequenceDiagram
 
   alt Still lagging after DynamoDB fix
     OPS->>KDS: Increase shard count<br/>aws kinesis update-shard-count --target-shard-count 4
-    Note over KDS: Resharding: ~30 seconds · brief consumer disruption
+    Note over KDS: Resharding takes time and can briefly disrupt consumers
     KDS->>RTP: Higher throughput capacity available
   end
 
   KDS->>CW: IteratorAgeMilliseconds < 5 000 ms
   CW->>OPS: OK — alarm resolved
-```
 ```
