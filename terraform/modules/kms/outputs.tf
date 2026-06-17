@@ -18,6 +18,8 @@ output "s3_key_id" {
   value       = aws_kms_key.s3.key_id
 }
 
+
+
 output "dynamodb_key_arn" {
   description = "KMS key ARN for DynamoDB tables"
   value       = aws_kms_key.dynamodb.arn
