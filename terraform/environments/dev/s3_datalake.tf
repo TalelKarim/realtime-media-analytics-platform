@@ -1,5 +1,5 @@
-module "s3_data_lake" {
-  source = "../../modules/s3_data_lake"
+module "s3_datalake" {
+  source = "../../modules/s3_datalake"
 
   project     = var.project
   environment = var.environment

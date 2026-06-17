@@ -176,32 +176,32 @@ output "sns_alerts_topic_arn" {
 # S3 Datalake
 
 
-output "s3_data_lake_bucket_name" {
+output "s3_datalake_bucket_name" {
   description = "Name of the S3 data lake bucket."
-  value       = module.s3_data_lake.bucket_name
+  value       = module.s3_datalake.bucket_name
 }
 
-output "s3_data_lake_bucket_arn" {
+output "s3_datalake_bucket_arn" {
   description = "ARN of the S3 data lake bucket."
-  value       = module.s3_data_lake.bucket_arn
+  value       = module.s3_datalake.bucket_arn
 }
 
-output "s3_data_lake_bronze_prefix" {
+output "s3_datalake_bronze_prefix" {
   description = "Bronze layer prefix."
-  value       = module.s3_data_lake.bronze_prefix
+  value       = module.s3_datalake.bronze_prefix
 }
 
-output "s3_data_lake_silver_prefix" {
+output "s3_datalake_silver_prefix" {
   description = "Silver layer prefix."
-  value       = module.s3_data_lake.silver_prefix
+  value       = module.s3_datalake.silver_prefix
 }
 
-output "s3_data_lake_gold_prefix" {
+output "s3_datalake_gold_prefix" {
   description = "Gold layer prefix."
-  value       = module.s3_data_lake.gold_prefix
+  value       = module.s3_datalake.gold_prefix
 }
 
-output "s3_data_lake_athena_results_prefix" {
+output "s3_datalake_athena_results_prefix" {
   description = "Athena query results prefix."
-  value       = module.s3_data_lake.athena_results_prefix
+  value       = module.s3_datalake.athena_results_prefix
 }
