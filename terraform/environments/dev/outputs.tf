@@ -170,3 +170,38 @@ output "sns_alerts_topic_arn" {
   description = "ARN of the alerts SNS topic."
   value       = module.sns.alerts_topic_arn
 }
+
+
+
+# S3 Datalake
+
+
+output "s3_data_lake_bucket_name" {
+  description = "Name of the S3 data lake bucket."
+  value       = module.s3_data_lake.bucket_name
+}
+
+output "s3_data_lake_bucket_arn" {
+  description = "ARN of the S3 data lake bucket."
+  value       = module.s3_data_lake.bucket_arn
+}
+
+output "s3_data_lake_bronze_prefix" {
+  description = "Bronze layer prefix."
+  value       = module.s3_data_lake.bronze_prefix
+}
+
+output "s3_data_lake_silver_prefix" {
+  description = "Silver layer prefix."
+  value       = module.s3_data_lake.silver_prefix
+}
+
+output "s3_data_lake_gold_prefix" {
+  description = "Gold layer prefix."
+  value       = module.s3_data_lake.gold_prefix
+}
+
+output "s3_data_lake_athena_results_prefix" {
+  description = "Athena query results prefix."
+  value       = module.s3_data_lake.athena_results_prefix
+}
