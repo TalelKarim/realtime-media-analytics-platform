@@ -12,3 +12,11 @@ kinesis_shard_level_metrics    = []
 sns_email_subscriptions = [
   "talelkarimc@gmail.com"
 ]
+
+
+tags = {
+  Project     = "realtime-media-analytics"
+  Environment = "dev"
+  ManagedBy   = "terraform"
+  Owner       = "talel-karim"
+}

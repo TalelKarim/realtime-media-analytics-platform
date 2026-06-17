@@ -46,3 +46,13 @@ variable "sns_email_subscriptions" {
   type        = list(string)
   default     = []
 }
+
+
+
+# general
+
+variable "tags" {
+  description = "Common tags applied to all resources."
+  type        = map(string)
+  default     = {}
+}
