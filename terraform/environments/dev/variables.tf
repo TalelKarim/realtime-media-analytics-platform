@@ -37,3 +37,12 @@ variable "kinesis_shard_level_metrics" {
   type        = list(string)
   default     = []
 }
+
+
+# SNS Variables
+
+variable "sns_email_subscriptions" {
+  description = "Email addresses subscribed to the alerts SNS topic."
+  type        = list(string)
+  default     = []
+}

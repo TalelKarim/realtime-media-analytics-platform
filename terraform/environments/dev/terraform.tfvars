@@ -8,3 +8,7 @@ environment = "dev"
 kinesis_shard_count            = 1
 kinesis_retention_period_hours = 48
 kinesis_shard_level_metrics    = []
+
+sns_email_subscriptions = [
+  "talelkarimc@gmail.com"
+]

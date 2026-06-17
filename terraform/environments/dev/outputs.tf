@@ -132,3 +132,41 @@ output "dynamodb_alert_state_table_arn" {
   description = "ARN of the alert state DynamoDB table."
   value       = module.dynamodb.alert_state_table_arn
 }
+
+
+# SQS AND SNS outputs
+
+output "sqs_broadcast_signal_queue_name" {
+  description = "Name of the broadcast signal FIFO queue."
+  value       = module.sqs.broadcast_signal_queue_name
+}
+
+output "sqs_broadcast_signal_queue_url" {
+  description = "URL of the broadcast signal FIFO queue."
+  value       = module.sqs.broadcast_signal_queue_url
+}
+
+output "sqs_broadcast_signal_queue_arn" {
+  description = "ARN of the broadcast signal FIFO queue."
+  value       = module.sqs.broadcast_signal_queue_arn
+}
+
+output "sqs_broadcast_signal_dlq_name" {
+  description = "Name of the broadcast signal dead-letter FIFO queue."
+  value       = module.sqs.broadcast_signal_dlq_name
+}
+
+output "sqs_broadcast_signal_dlq_arn" {
+  description = "ARN of the broadcast signal dead-letter FIFO queue."
+  value       = module.sqs.broadcast_signal_dlq_arn
+}
+
+output "sns_alerts_topic_name" {
+  description = "Name of the alerts SNS topic."
+  value       = module.sns.alerts_topic_name
+}
+
+output "sns_alerts_topic_arn" {
+  description = "ARN of the alerts SNS topic."
+  value       = module.sns.alerts_topic_arn
+}
