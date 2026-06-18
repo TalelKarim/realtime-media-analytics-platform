@@ -5,7 +5,7 @@ module "cloudwatch_log_groups" {
   environment = var.environment
 
   kms_key_arn       = module.kms.logs_key_arn
-  retention_in_days = var.cloudwatch_log_retention_days
+  retention_in_days = 7
 
   log_group_names = [
     "/ecs/${var.project}-${var.environment}-collector",
