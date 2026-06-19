@@ -205,3 +205,38 @@ output "s3_datalake_athena_results_prefix" {
   description = "Athena query results prefix."
   value       = module.s3_datalake.athena_results_prefix
 }
+
+
+
+# ECS Outputs 
+# Phase 10 outputs — ECS Fargate Collector
+
+output "ecs_collector_cluster_name" {
+  description = "ECS collector cluster name"
+  value       = module.ecs_collector.cluster_name
+}
+
+output "ecs_collector_cluster_arn" {
+  description = "ECS collector cluster ARN"
+  value       = module.ecs_collector.cluster_arn
+}
+
+output "ecs_collector_service_name" {
+  description = "ECS collector service name"
+  value       = module.ecs_collector.service_name
+}
+
+output "ecs_collector_service_arn" {
+  description = "ECS collector service ARN"
+  value       = module.ecs_collector.service_arn
+}
+
+output "ecs_collector_task_definition_arn" {
+  description = "ECS collector task definition ARN"
+  value       = module.ecs_collector.task_definition_arn
+}
+
+output "ecs_collector_container_image" {
+  description = "Collector container image configured in task definition"
+  value       = module.ecs_collector.container_image
+}
