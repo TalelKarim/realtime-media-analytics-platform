@@ -25,7 +25,7 @@ tags = {
 
 # ECS Fargate Collector 
 collector_image_tag                = "dev-001"
-collector_desired_count            = 0
+collector_desired_count            = 1
 collector_task_cpu                 = 256
 collector_task_memory              = 512
 collector_sample_rate              = 0.01
