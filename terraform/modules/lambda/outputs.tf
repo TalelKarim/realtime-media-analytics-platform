@@ -19,6 +19,6 @@ output "qualified_arn" {
 }
 
 output "log_group_name" {
-  description = "CloudWatch log group name."
+  description = "Lambda log group name."
   value       = local.log_group_name
 }

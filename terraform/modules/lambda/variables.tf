@@ -21,7 +21,7 @@ variable "handler" {
 }
 
 variable "source_dir" {
-  description = "Path to the Lambda source directory to package."
+  description = "Path to the prepared Lambda package directory."
   type        = string
 }
 
@@ -31,7 +31,7 @@ variable "role_arn" {
 }
 
 variable "memory_size" {
-  description = "Amount of memory in MB."
+  description = "Lambda memory size in MB."
   type        = number
   default     = 256
 }
@@ -48,41 +48,40 @@ variable "environment_variables" {
   default     = {}
 }
 
-variable "package_excludes" {
-  description = "Files or folders excluded from the Lambda zip package."
-  type        = list(string)
-  default = [
-    ".venv/*",
-    "__pycache__/*",
-    "*.pyc",
-    ".pytest_cache/*",
-    ".DS_Store",
-    "tests/*"
-  ]
-}
-
 variable "layers" {
-  description = "Optional Lambda layer ARNs."
+  description = "Lambda layer ARNs attached to the function."
   type        = list(string)
   default     = []
 }
 
 variable "architectures" {
-  description = "Instruction set architecture for the Lambda function."
+  description = "Lambda instruction set architecture."
   type        = list(string)
   default     = ["arm64"]
 }
 
 variable "create_log_group" {
-  description = "Whether this module should create the CloudWatch log group."
+  description = "Whether to create the Lambda CloudWatch log group."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "log_retention_in_days" {
   description = "CloudWatch log group retention in days."
   type        = number
   default     = 14
+}
+
+variable "package_excludes" {
+  description = "Files excluded from Lambda zip."
+  type        = list(string)
+  default = [
+    "__pycache__/*",
+    "*.pyc",
+    ".pytest_cache/*",
+    ".DS_Store",
+    "tests/*"
+  ]
 }
 
 variable "tags" {
