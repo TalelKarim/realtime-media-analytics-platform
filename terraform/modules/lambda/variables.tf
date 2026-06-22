@@ -63,7 +63,7 @@ variable "architectures" {
 variable "create_log_group" {
   description = "Whether to create the Lambda CloudWatch log group."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "log_retention_in_days" {
