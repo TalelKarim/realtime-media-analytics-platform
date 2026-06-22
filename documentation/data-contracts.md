@@ -290,7 +290,7 @@ Broadcaster reads `SHARD#0` through `SHARD#9` and sums all counters.
   "ttl": 1781203440
 }
 ```
-
+ 
 ### 3c — Top Pages (namespace = 0 only)
 
 Log events and categorize events are excluded.
