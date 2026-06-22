@@ -89,8 +89,8 @@ def lambda_handler(event, context):
     # Minimal DynamoDB write to validate permissions and connectivity.
     table.update_item(
         Key={
-            "PK": "TEST#REALTIME_PROCESSOR",
-            "SK": "KINESIS_CONNECTIVITY"
+            "metric_key": "TEST#REALTIME_PROCESSOR",
+            "window_key": "KINESIS_CONNECTIVITY"
         },
         UpdateExpression="""
             ADD invocation_count :one, decoded_record_count :decoded
