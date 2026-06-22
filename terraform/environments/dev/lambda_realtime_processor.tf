@@ -18,11 +18,18 @@ module "realtime_processor_lambda" {
     module.common_python_layer.layer_arn
   ]
 
-  environment_variables = {
-    ENVIRONMENT           = var.environment
-    LOG_LEVEL             = "INFO"
-    AGGREGATES_TABLE_NAME = module.dynamodb.realtime_aggregates_table_name
-  }
+    environment_variables = {
+    ENVIRONMENT                  = var.environment
+    LOG_LEVEL                    = "INFO"
+
+    AGGREGATES_TABLE_NAME        = module.dynamodb.realtime_aggregates_table_name
+    BROADCAST_QUEUE_URL          = module.sqs.broadcast_signal_queue_url
+
+    AGGREGATION_WINDOW_SECONDS   = "60"
+    BROADCAST_WINDOW_SECONDS     = "5"
+    GLOBAL_ACTIVITY_SHARD_COUNT  = "10"
+    AGGREGATE_TTL_DAYS           = "2"
+    }
 
   tags = local.tags
 }
