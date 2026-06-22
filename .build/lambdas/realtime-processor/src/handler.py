@@ -99,8 +99,11 @@ def lambda_handler(event, context):
                 last_event_type = :event_type,
                 last_wiki = :wiki,
                 last_change_type = :change_type,
-                ttl = :ttl
+                #ttl = :ttl
         """,
+        ExpressionAttributeNames={
+            "#ttl": "ttl"
+        },
         ExpressionAttributeValues={
             ":one": 1,
             ":decoded": decoded_count,
