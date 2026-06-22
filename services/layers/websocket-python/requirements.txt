@@ -1,0 +1,1 @@
+# Shared dependencies used by WebSocket-related Lambda functions.
