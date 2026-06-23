@@ -412,12 +412,9 @@ SK = CONNECTION#{connection_id}
 **Consumer:** Broadcaster Lambda
 
 ```json
-{
-  "message_type": "aggregates.updated",
-  "aggregation_window": "2026-06-11T16:44:00Z",
-  "broadcast_window": "2026-06-11T16:44:10Z",
-  "created_at": "2026-06-11T16:44:10.123Z"
-}
+{ "message_type": "aggregates.updated", "source": "realtime-processor",
+ "created_at": "2026-06-11T16:44:10.123Z", "broadcast_window": "2026-06-11T16:44:10Z",
+ "aggregation_windows": [ "2026-06-11T16:43:00Z", "2026-06-11T16:44:00Z" ] }
 ```
 
 ```
@@ -427,7 +424,8 @@ MessageDeduplicationId = "broadcast-window-2026-06-11T16:44:10Z"
 
 Definitions:
 ```
-aggregation_window = 1-minute DynamoDB counter window
+aggregation_windows = a list of  1-minute DynamoDB counter window : A single lambda inocation can update more than one aggregation window 
+
 broadcast_window   = 5-second dashboard refresh window
 ```
 
