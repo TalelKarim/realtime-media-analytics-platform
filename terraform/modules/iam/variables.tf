@@ -39,6 +39,11 @@ variable "kinesis_stream_name" {
   default     = null
 }
 
+variable "sns_key_arn" {
+  description = "ARN of the KMS key used to encrypt SNS topics"
+  type        = string
+}
+
 variable "realtime_aggregates_table_name" {
   description = "Future DynamoDB realtime aggregates table name"
   type        = string
