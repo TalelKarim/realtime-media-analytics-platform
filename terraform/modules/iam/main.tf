@@ -43,6 +43,7 @@ locals {
     var.s3_key_arn,
     var.dynamodb_key_arn,
     var.sqs_key_arn,
+    var.sns_key_arn,
     var.logs_key_arn
   ]
 }
@@ -465,6 +466,7 @@ resource "aws_iam_role_policy" "alert_processor" {
           "dynamodb:GetItem",
           "dynamodb:PutItem",
           "dynamodb:UpdateItem",
+          "dynamodb:Query",
           "dynamodb:DescribeTable"
         ]
         Resource = local.alert_state_table_arn
@@ -488,7 +490,8 @@ resource "aws_iam_role_policy" "alert_processor" {
         ]
         Resource = [
           var.kinesis_key_arn,
-          var.dynamodb_key_arn
+          var.dynamodb_key_arn,
+          var.sns_key_arn
         ]
       }
     ]
