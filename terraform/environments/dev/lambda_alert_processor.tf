@@ -9,7 +9,7 @@ module "lambda_alert_processor" {
   description   = "Consumes Wikimedia events from Kinesis and prepares realtime alert detection."
 
   runtime = "python3.11"
-  handler = "handler.lambda_handler"
+  handler = "src.handler.lambda_handler"
 
   # Use the same source_dir pattern as the realtime processor.
   # If your existing realtime processor uses another relative path,
