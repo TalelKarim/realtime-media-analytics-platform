@@ -43,17 +43,6 @@ output "sqs_key_id" {
 
 
 
-output "sns_key_arn" {
-  description = "KMS key ARN for SQS FIFO queue"
-  value       = aws_kms_key.sns.arn
-}
-
-output "sns_key_id" {
-  description = "KMS key ID for SQS FIFO queue"
-  value       = aws_kms_key.sns.key_id
-}
-
-
 output "logs_key_arn" {
   description = "KMS key ARN for CloudWatch Logs"
   value       = aws_kms_key.logs.arn
