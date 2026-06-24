@@ -268,8 +268,9 @@ payload.log_action
 payload.user_is_bot
 ```
 
-Optional log fields must be handled gracefully.
-
+Optional / used only for log detection 
+payload.log_type
+payload.log_action
 ---
 
 ## Contract 3 — DynamoDB `realtime_aggregates`

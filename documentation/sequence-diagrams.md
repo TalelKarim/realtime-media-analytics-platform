@@ -33,22 +33,26 @@ sequenceDiagram
   KDS->>RTP: Trigger Lambda with event batch
 
   loop For each normalized envelope in batch
-    RTP->>RTP: Read stable payload<br/>Compute aggregation_window = 1-minute bucket<br/>Compute shard_id = hash(event_id) % 10
-
-    RTP->>DDB: UpdateItem ADD counters<br/>PK=METRIC#GLOBAL_ACTIVITY#SHARD#{shard_id}<br/>SK=WINDOW#{aggregation_window}
-
-    RTP->>DDB: UpdateItem ADD counters<br/>PK=METRIC#WIKI_ACTIVITY#WIKI#{wiki}<br/>SK=WINDOW#{aggregation_window}
-
-    alt namespace == 0
-      RTP->>DDB: UpdateItem ADD events_count<br/>PK=METRIC#TOP_PAGES#WIKI#{wiki}<br/>SK=WINDOW#{aggregation_window}#TITLE#{title}
-    end
-
-    RTP->>DDB: UpdateItem ADD events_count<br/>PK=METRIC#CHANGE_TYPE#TYPE#{change_type}<br/>SK=WINDOW#{aggregation_window}
-
-    RTP->>DDB: UpdateItem ADD events_count<br/>PK=METRIC#NAMESPACE#NS#{namespace}<br/>SK=WINDOW#{aggregation_window}
+    RTP->>RTP: Read stable payload<br/>Compute aggregation_window = 1-minute bucket<br/>Aggregate counters in memory by metric_key/window_key
   end
 
-  RTP->>SQS: SendMessage<br/>aggregation_window=1-minute bucket<br/>broadcast_window=5-second bucket<br/>DedupId=broadcast-window-{broadcast_window}
+  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#GLOBAL_ACTIVITY#SHARD#{hash(event_id)%10}<br/>SK=WINDOW#{aggregation_window}
+
+  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#WIKI_ACTIVITY#WIKI#{wiki}<br/>SK=WINDOW#{aggregation_window}
+
+  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#TOP_WIKIS#SHARD#{hash(wiki)%10}<br/>SK=WINDOW#{aggregation_window}#WIKI#{wiki}
+
+  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#CHANGE_TYPE#TYPE#{change_type}<br/>SK=WINDOW#{aggregation_window}
+
+  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#BOT_ACTIVITY#BOT#{true|false}<br/>SK=WINDOW#{aggregation_window}
+
+  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#NAMESPACE#NS#{namespace}<br/>SK=WINDOW#{aggregation_window}
+
+  alt namespace == 0
+    RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#TOP_PAGES#SHARD#{hash(wiki#title)%10}<br/>SK=WINDOW#{aggregation_window}#WIKI#{wiki}#TITLE#{page_hash}
+  end
+
+  RTP->>SQS: SendMessage<br/>aggregation_windows=[1-minute buckets]<br/>broadcast_window=5-second bucket<br/>MessageGroupId=realtime-broadcast<br/>DedupId=BROADCAST#{broadcast_window}
   Note over SQS: Deduplicates broadcast triggers<br/>One broadcaster invocation per 5-second window<br/>No separate 5-second aggregate is stored
 
   SQS->>BRD: Trigger Broadcaster Lambda
@@ -57,10 +61,23 @@ sequenceDiagram
     BRD->>DDB: GetItem<br/>PK=METRIC#GLOBAL_ACTIVITY#SHARD#{n}<br/>SK=WINDOW#{aggregation_window}
   end
 
-  BRD->>BRD: Sum global shards<br/>Compute current_minute_events_so_far<br/>Compute bot_ratio and human_ratio
+  BRD->>BRD: Sum global shards<br/>Compute current_minute_events_so_far
 
-  BRD->>DDB: Read last completed minute aggregates
-  DDB-->>BRD: Stable completed-minute counters
+  BRD->>DDB: GetItem BOT_ACTIVITY true/false<br/>SK=WINDOW#{aggregation_window}
+  BRD->>BRD: Compute bot_ratio and human_count
+
+  BRD->>DDB: GetItem CHANGE_TYPE known values<br/>SK=WINDOW#{aggregation_window}
+  BRD->>DDB: GetItem NAMESPACE known/common values<br/>SK=WINDOW#{aggregation_window}
+
+  loop For each TOP_WIKIS shard 0..9
+    BRD->>DDB: Query<br/>PK=METRIC#TOP_WIKIS#SHARD#{n}<br/>begins_with(SK, WINDOW#{aggregation_window}#WIKI#)
+  end
+  BRD->>BRD: Merge and sort top_wikis by event_count
+
+  loop For each TOP_PAGES shard 0..9
+    BRD->>DDB: Query<br/>PK=METRIC#TOP_PAGES#SHARD#{n}<br/>begins_with(SK, WINDOW#{aggregation_window}#)
+  end
+  BRD->>BRD: Merge and sort top_pages by event_count
 
   BRD->>DBC: Scan active websocket_connections
   DBC-->>BRD: Active connection items
@@ -181,35 +198,69 @@ sequenceDiagram
   participant OPS as Platform Engineer
 
   KDS->>ALP: Trigger Lambda with event batch
-  ALP->>ALP: Read payload from each envelope
-  ALP->>ALP: Count event_count, log_count, delete_count, block_count
+  ALP->>ALP: Decode Kinesis records<br/>Validate event_type=wiki.recentchange<br/>Extract wiki, change_type, log_type, occurred_at
+  ALP->>ALP: Aggregate counters in memory<br/>by alert_key/window_key
 
-  ALP->>DDB: UpdateItem ADD counters<br/>PK=ALERT#GLOBAL<br/>SK=MINUTE#{current_minute}
+  ALP->>DDB: UpdateItem ADD counters<br/>PK=ALERT#GLOBAL<br/>SK=WINDOW#{event_minute}
 
-  loop For each wiki in batch
-    ALP->>DDB: UpdateItem ADD counters<br/>PK=ALERT#WIKI#{wiki}<br/>SK=MINUTE#{current_minute}
+  loop For each wiki touched by batch
+    ALP->>DDB: UpdateItem ADD counters<br/>PK=ALERT#WIKI#{wiki}<br/>SK=WINDOW#{event_minute}
   end
 
-  alt delete or block log events exist
-    ALP->>DDB: UpdateItem ADD counters<br/>PK=ALERT#LOG_TYPE#delete/block<br/>SK=MINUTE#{current_minute}
+  alt delete log events exist
+    ALP->>DDB: UpdateItem ADD counters<br/>PK=ALERT#LOG_TYPE#delete<br/>SK=WINDOW#{event_minute}
   end
 
-  ALP->>DDB: Query ALERT#GLOBAL<br/>last 30 minutes
-  DDB-->>ALP: Rolling global event_count history
-  ALP->>ALP: Compute rolling average, stddev, z_score
+  alt block log events exist
+    ALP->>DDB: UpdateItem ADD counters<br/>PK=ALERT#LOG_TYPE#block<br/>SK=WINDOW#{event_minute}
+  end
 
-  ALP->>DDB: Query ALERT#LOG_TYPE#delete/block<br/>last 5 minutes
-  DDB-->>ALP: Rolling moderation action history
-  ALP->>ALP: Detect delete/block burst
+  ALP->>ALP: Select latest completed eligible window<br/>using EVALUATION_DELAY_SECONDS
 
-  alt z_score > 2.0
-    ALP->>SNS: Publish global or wiki activity spike alert
-    SNS->>OPS: Email / SMS notification
-  else delete/block burst > 3x normal over 5 minutes
-    ALP->>SNS: Publish moderation burst alert
-    SNS->>OPS: Email / SMS notification
-  else normal activity
-    ALP->>ALP: No alert
+  loop For ALERT#GLOBAL and touched ALERT#WIKI#{wiki}
+    ALP->>DDB: GetItem current completed window<br/>PK=alert_key<br/>SK=WINDOW#{evaluation_minute}
+    DDB-->>ALP: Current completed-window counters
+
+    ALP->>DDB: Query previous 30 completed windows<br/>PK=alert_key
+    DDB-->>ALP: Baseline event_count points
+
+    ALP->>ALP: If baseline_points >= MIN_BASELINE_POINTS<br/>compute average, stddev, z_score
+
+    alt z_score > threshold and current_count >= minimum
+      ALP->>DDB: Reserve alert<br/>SET alert_status=PUBLISHING<br/>IF attribute_not_exists(alert_status)
+      alt reservation succeeds
+        ALP->>SNS: Publish activity spike alert
+        SNS->>OPS: Email / SMS notification
+        ALP->>DDB: Mark alert SENT<br/>SET alert_status=SENT<br/>SET alert_sent_at=now
+      else already reserved or sent
+        ALP->>ALP: Deduplicate<br/>Do not publish SNS
+      end
+    else normal or insufficient baseline
+      ALP->>ALP: No SNS
+    end
+  end
+
+  loop For ALERT#LOG_TYPE#delete and ALERT#LOG_TYPE#block when touched
+    ALP->>DDB: Query current moderation window<br/>last 5 completed minutes
+    DDB-->>ALP: Current 5-minute delete/block count
+
+    ALP->>DDB: Query historical moderation windows
+    DDB-->>ALP: Baseline 5-minute group counts
+
+    ALP->>ALP: Compute burst_ratio
+
+    alt burst_ratio > threshold and current_5m_count >= minimum
+      ALP->>DDB: Reserve alert<br/>SET alert_status=PUBLISHING<br/>IF attribute_not_exists(alert_status)
+      alt reservation succeeds
+        ALP->>SNS: Publish moderation burst alert
+        SNS->>OPS: Email / SMS notification
+        ALP->>DDB: Mark alert SENT<br/>SET alert_status=SENT<br/>SET alert_sent_at=now
+      else already reserved or sent
+        ALP->>ALP: Deduplicate<br/>Do not publish SNS
+      end
+    else normal or insufficient baseline
+      ALP->>ALP: No SNS
+    end
   end
 ```
 

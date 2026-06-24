@@ -131,26 +131,35 @@ Consumes Kinesis batches. For each normalized envelope:
 1. Decode and validate the normalized envelope contract.
 2. Read only the stable normalized `payload` for real-time computation.
 3. Compute the 1-minute `aggregation_window`.
-4. Compute `shard_id = hash(event_id) % AGGREGATE_WRITE_SHARDS` (default: 10).
+4. Aggregate records in memory by `(metric_key, window_key)` before writing.
 5. Atomic `UpdateItem ADD` on DynamoDB — no read-modify-write.
-6. Write to `METRIC#GLOBAL_ACTIVITY#SHARD#{shard_id}`.
-7. Write to `METRIC#WIKI_ACTIVITY#WIKI#{wiki}`.
-8. If `namespace = 0`: write to `METRIC#TOP_PAGES#WIKI#{wiki}`.
-9. Write to `METRIC#CHANGE_TYPE#TYPE#{change_type}`.
-10. Write to `METRIC#NAMESPACE#NS#{namespace}`.
-11. Send a deduplicated broadcast signal to SQS FIFO every 5-second broadcast window.
+6. Write global activity to `METRIC#GLOBAL_ACTIVITY#SHARD#{shard_id}`, where `shard_id = hash(event_id) % GLOBAL_ACTIVITY_SHARD_COUNT`.
+7. Write known-wiki activity to `METRIC#WIKI_ACTIVITY#WIKI#{wiki}`.
+8. Write top-wikis candidates to `METRIC#TOP_WIKIS#SHARD#{shard_id}`, where `shard_id = hash(wiki) % TOP_METRIC_SHARD_COUNT`.
+9. Write change type distribution to `METRIC#CHANGE_TYPE#TYPE#{change_type}`.
+10. Write bot/human activity to `METRIC#BOT_ACTIVITY#BOT#{true|false}`.
+11. Write namespace distribution to `METRIC#NAMESPACE#NS#{namespace}`.
+12. If `namespace = 0`: write top-pages candidates to `METRIC#TOP_PAGES#SHARD#{shard_id}`, where `shard_id = hash(wiki#title) % TOP_METRIC_SHARD_COUNT`.
+13. Send a deduplicated broadcast signal to SQS FIFO every 5-second broadcast window after successful DynamoDB writes.
 
-> Log events (`namespace = -1`) are counted in global and wiki activity but excluded from top pages.
+> Log events (`namespace = -1`) are counted in global, wiki, top-wikis, change-type, bot, and namespace activity but excluded from top pages because top pages only includes `namespace = 0`.
 
 ### Write Sharding
 
-Global counters are distributed across 10 DynamoDB shards to prevent hot partition throttling.
+Global counters and top read models are distributed across DynamoDB shards to prevent hot partitions and avoid scans over high-cardinality dimensions.
 
 ```
-AGGREGATE_WRITE_SHARDS = 10
+GLOBAL_ACTIVITY_SHARD_COUNT = 10
+TOP_METRIC_SHARD_COUNT      = 10
 
-Write: METRIC#GLOBAL_ACTIVITY#SHARD#{0..9}
-Read:  Broadcaster reads all 10 shards and sums them
+Global activity write: METRIC#GLOBAL_ACTIVITY#SHARD#{0..9}
+Global activity read : Broadcaster reads all global shards and sums event_count
+
+Top wikis write      : METRIC#TOP_WIKIS#SHARD#{0..9}
+Top wikis read       : Broadcaster queries all TOP_WIKIS shards for WINDOW#{minute}#WIKI#*, merges, sorts by event_count, returns top N
+
+Top pages write      : METRIC#TOP_PAGES#SHARD#{0..9}
+Top pages read       : Broadcaster queries all TOP_PAGES shards for WINDOW#{minute}#*, merges, sorts by event_count, returns top N
 ```
 
 ### SQS FIFO Deduplication
@@ -172,8 +181,8 @@ broadcast_window   = 2026-06-11T16:44:10Z
 
 Message settings:
 ```
-MessageGroupId         = "broadcast-signal"
-MessageDeduplicationId = "broadcast-window-{broadcast_window}"
+MessageGroupId         = "realtime-broadcast"
+MessageDeduplicationId = "BROADCAST#{broadcast_window}"
 ```
 
 This means the Realtime Processor can update the same minute counter continuously, while the Broadcaster pushes a live snapshot of the in-progress minute every 5 seconds.
@@ -182,14 +191,17 @@ This means the Realtime Processor can update the same minute counter continuousl
 
 Triggered by SQS FIFO. For each broadcast signal:
 
-1. Read all 10 global activity shards for the signal's `aggregation_window`.
-2. Sum totals and compute `bot_ratio`.
-3. Read current minute partial counters and recent completed windows.
-4. Scan `websocket_connections`.
-5. Filter subscribed topics inside Lambda.
-6. Build `stats.update` messages for each requested topic.
-7. Call `postToConnection` for each connection.
-8. On `GoneException / 410`: delete the stale connection from DynamoDB.
+1. Read all global activity shards for the requested `aggregation_window` and sum `event_count`.
+2. Read `BOT_ACTIVITY` true/false counters and compute `bot_ratio`.
+3. Read known `CHANGE_TYPE` counters.
+4. Read known/common `NAMESPACE` counters.
+5. Query all `TOP_WIKIS#SHARD#{n}` partitions with `begins_with(window_key, "WINDOW#{minute}#WIKI#")`, merge results, sort by `event_count`, and return top N.
+6. Query all `TOP_PAGES#SHARD#{n}` partitions with `begins_with(window_key, "WINDOW#{minute}#")`, merge results, sort by `event_count`, and return top N.
+7. Scan `websocket_connections`.
+8. Filter subscribed topics inside Lambda.
+9. Build `stats.update` messages for each requested topic.
+10. Call `postToConnection` for each connection.
+11. On `GoneException / 410`: delete the stale connection from DynamoDB.
 
 V1 intentionally uses a DynamoDB Scan on `websocket_connections` because subscriptions are stored as a list on the connection item. This is acceptable for portfolio scale. V2 introduces a `websocket_subscriptions` table keyed by topic.
 
@@ -248,31 +260,40 @@ SK = CONNECTION#{connection_id}
 PK  = metric_key   (string)
 SK  = window_key   (string)
 
-TTL = window_start + 7200 seconds (2 hours)
+TTL = now + AGGREGATE_TTL_DAYS
 ```
 
-Five item patterns:
+Current default:
+```
+AGGREGATE_TTL_DAYS = 2
+```
+
+Item patterns:
 
 ```
 METRIC#GLOBAL_ACTIVITY#SHARD#{0-9}  /  WINDOW#{minute}
 METRIC#WIKI_ACTIVITY#WIKI#{wiki}    /  WINDOW#{minute}
-METRIC#TOP_PAGES#WIKI#{wiki}        /  WINDOW#{minute}#TITLE#{title}
+METRIC#TOP_WIKIS#SHARD#{0-9}        /  WINDOW#{minute}#WIKI#{wiki}
 METRIC#CHANGE_TYPE#TYPE#{type}      /  WINDOW#{minute}
+METRIC#BOT_ACTIVITY#BOT#{true|false}/  WINDOW#{minute}
 METRIC#NAMESPACE#NS#{namespace}     /  WINDOW#{minute}
+METRIC#TOP_PAGES#SHARD#{0-9}        /  WINDOW#{minute}#WIKI#{wiki}#TITLE#{page_hash}
 ```
+
+Top pages are written only when `namespace = 0`. The real display fields (`wiki`, `title`, `title_url`) are stored as item attributes; the `TITLE#{page_hash}` suffix is only used to keep the key compact and stable.
 
 ### Table: alert_state
 
 ```
-PK  = alert_scope   (string)   — "ALERT#GLOBAL", "ALERT#WIKI#{wiki}", "ALERT#LOG_TYPE#{log_type}"
-SK  = minute_key    (string)   — "MINUTE#{yyyy-MM-ddTHH:mm}"
+PK  = alert_key   (string)   — "ALERT#GLOBAL", "ALERT#WIKI#{wiki}", "ALERT#LOG_TYPE#delete", "ALERT#LOG_TYPE#block"
+SK  = window_key  (string)   — "WINDOW#{yyyy-MM-ddTHH:mm:00Z}"
 
-TTL = minute_start + 2100 seconds (35 minutes)
+TTL = window_start + 2100 seconds (35 minutes)
 ```
 
-Stores per-minute event counts for the Alert Processor rolling window.
+Stores short-lived per-minute counters for the Alert Processor rolling window.
 
-The Lambda updates the current minute using atomic `UpdateItem ADD`, then reads the last 30 minutes to detect activity spikes via `z_score`.
+The Lambda updates alert counters using atomic `UpdateItem ADD`, then evaluates a completed window against recent historical windows to detect activity spikes via `z_score` or moderation bursts via `burst_ratio`.
 
 Tracked counters:
 ```
@@ -282,25 +303,65 @@ delete_count
 block_count
 ```
 
+Alert state fields added only when an alert is published:
+```
+alert_status       PUBLISHING or SENT
+alert_reserved_at  ISO8601 timestamp
+alert_sent_at      ISO8601 timestamp
+alert_type         GLOBAL_ACTIVITY_SPIKE, WIKI_ACTIVITY_SPIKE, or MODERATION_BURST
+current_count      count used for the decision
+baseline_avg       historical baseline average
+baseline_stddev    historical baseline standard deviation
+z_score            computed z-score for global/wiki spikes
+threshold          z-score threshold used for the decision
+burst_ratio        computed ratio for moderation burst alerts
+```
+
 Design note: 35-minute TTL provides 5 minutes of margin beyond the 30-minute rolling window.
 
 ---
 
 ## Alert Processor
 
-Consumes Kinesis independently. It reads the normalized `payload`, updates DynamoDB `alert_state`, then queries recent state to detect anomalies.
+Consumes Kinesis independently. It reads the normalized `payload`, builds alert counters in memory, writes short-lived counters to DynamoDB `alert_state`, evaluates completed windows, deduplicates alert publication, and publishes SNS alerts.
+
+Processing order:
+
+1. Decode and validate Kinesis normalized envelopes.
+2. Extract `wiki`, `change_type`, `log_type`, `log_action`, `occurred_at`, and `user_is_bot`.
+3. Aggregate counters in memory by `(alert_key, window_key)`.
+4. Write counters to `alert_state` using `UpdateItem ADD`.
+5. Select the latest completed eligible window using `EVALUATION_DELAY_SECONDS` so the still-open minute is not evaluated too early.
+6. Query historical windows from `alert_state`.
+7. Skip alert evaluation when there are fewer than `MIN_BASELINE_POINTS` historical points.
+8. Detect global and per-wiki spikes using `z_score`.
+9. Detect delete/block moderation bursts using a 5-minute rolling window and `burst_ratio`.
+10. Before SNS, reserve the alert with `SET alert_status = "PUBLISHING"` only if `attribute_not_exists(alert_status)`.
+11. Publish SNS only if reservation succeeds.
+12. Mark the item `alert_status = "SENT"` after SNS publish succeeds.
 
 Detections:
-- Global event volume spike: `z_score > 2.0` over a 30-minute rolling window.
-- Per-wiki event volume spike: `z_score > 2.0` over a 30-minute rolling window.
-- Moderation burst: `delete` or `block` count > 3× normal over a 5-minute window.
+- Global event volume spike: `z_score > GLOBAL_Z_THRESHOLD` over a 30-minute rolling window and `current_count >= GLOBAL_MIN_COUNT`.
+- Per-wiki event volume spike: `z_score > WIKI_Z_THRESHOLD` over a 30-minute rolling window and `current_count >= WIKI_MIN_COUNT`.
+- Moderation burst: `delete` or `block` count > `MODERATION_BURST_RATIO_THRESHOLD × normal` over a 5-minute window and current count above its configured minimum.
 
 Write model:
 ```
 UpdateItem ADD event_count, log_count, delete_count, block_count
+SET window_start, last_updated_at, ttl
 ```
 
-Publishes to SNS on detection.
+Deduplication model:
+```
+SET alert_status = "PUBLISHING"
+ONLY IF attribute_not_exists(alert_status)
+
+After successful SNS publish:
+SET alert_status = "SENT"
+SET alert_sent_at = now
+```
+
+This guarantees at most one SNS publication per `(alert_key, window_key)`, while counters can continue to increase during the same window.
 
 ---
 
@@ -452,7 +513,7 @@ For Lambda consumers, IteratorAge measures the age of the last Kinesis record in
 | Realtime Processor Lambda | `kinesis:GetRecords`, `kinesis:GetShardIterator`, `dynamodb:UpdateItem`, `sqs:SendMessage`, KMS use for Kinesis/DynamoDB/SQS |
 | Broadcaster Lambda | `dynamodb:GetItem`, `dynamodb:Scan`, `dynamodb:DeleteItem`, `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `execute-api:ManageConnections`, KMS use for DynamoDB/SQS |
 | Connect / Disconnect / Default Lambdas | `dynamodb:PutItem`, `dynamodb:DeleteItem`, `dynamodb:UpdateItem`, `execute-api:ManageConnections` for acknowledgements |
-| Alert Processor Lambda | `kinesis:GetRecords`, `kinesis:GetShardIterator`, `dynamodb:GetItem`, `dynamodb:UpdateItem`, `dynamodb:Query`, `sns:Publish`, KMS use for Kinesis/DynamoDB |
+| Alert Processor Lambda | `kinesis:GetRecords`, `kinesis:GetShardIterator`, `dynamodb:GetItem`, `dynamodb:UpdateItem`, `dynamodb:Query`, `sns:Publish`, KMS use for Kinesis/DynamoDB/SNS |
 | Firehose Delivery Stream | `kinesis:GetRecords`, `s3:PutObject`, KMS use for Kinesis/S3 |
 | Glue ETL Jobs | `s3:GetObject`, `s3:PutObject`, Glue Data Catalog access, KMS use for S3 |
 

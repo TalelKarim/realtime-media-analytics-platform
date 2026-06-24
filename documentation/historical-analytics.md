@@ -87,7 +87,7 @@ The original Wikimedia JSON remains available inside `raw_event`.
 
 ```
 Format    : Apache Parquet, SNAPPY compression
-Schema    : typed, null-safe normalized schema (see data-contracts.md Contract 10)
+Schema    : typed, null-safe normalized schema (see data-contracts.md Contract 12)
 Purpose   : ad-hoc Athena queries across the full event history
 Retention : 1 year → Glacier after 60 days
 ```
@@ -98,7 +98,7 @@ Silver is built from the envelope-level fields and `payload`. It does not need t
 
 ```
 Format    : Apache Parquet, SNAPPY compression
-Schema    : 5 metric-specific datasets (see data-contracts.md Contract 11)
+Schema    : 5 metric-specific datasets (see data-contracts.md Contract 13)
 Purpose   : fast QuickSight dashboards — minimal Athena scan surface
 Retention : 3 years → Standard-IA after 30 days
 ```
