@@ -2,18 +2,6 @@
 
 This document is the source of truth for the platform data contracts.
 
-Implementation rule: application code must align with this contract. If a Lambda writes, reads, or publishes a field, the field must be documented here first.
-
-Current alignment status:
-
-- ECS Fargate Collector: target contract defined here.
-- Kinesis normalized envelope: target contract defined here.
-- Realtime Processor Lambda: aligned with this document.
-- DynamoDB `realtime_aggregates`: aligned with this document.
-- SQS FIFO broadcast signal: aligned with current Realtime Processor implementation.
-- DynamoDB `alert_state`: target contract for Alert Processor V1.
-- SNS alert messages: target contract for Alert Processor V1.
-- S3 Bronze/Silver/Gold: target contracts for historical analytics.
 
 Schema reference:
 
