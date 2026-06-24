@@ -41,8 +41,8 @@ module "lambda_alert_processor" {
     # Baseline configuration
     BASELINE_WINDOW_MINUTES          = "30"
     MODERATION_WINDOW_MINUTES        = "5"
-    MIN_BASELINE_POINTS              = var.environment == "dev" ? "3" : "10"
-    MIN_MODERATION_BASELINE_POINTS   = var.environment == "dev" ? "2" : "3"
+    MIN_BASELINE_POINTS              = var.environment == "dev" ? "8" : "10"
+    MIN_MODERATION_BASELINE_POINTS   = var.environment == "dev" ? "8" : "3"
 
     # Detection thresholds
     GLOBAL_Z_THRESHOLD                  = "2.0"
@@ -51,10 +51,10 @@ module "lambda_alert_processor" {
 
     # Minimum counts to avoid noisy alerts on tiny volumes.
     # Dev values are intentionally lower so you can observe behavior faster.
-    GLOBAL_MIN_COUNT = var.environment == "dev" ? "5" : "50"
-    WIKI_MIN_COUNT   = var.environment == "dev" ? "3" : "30"
-    DELETE_MIN_COUNT = var.environment == "dev" ? "2" : "5"
-    BLOCK_MIN_COUNT  = var.environment == "dev" ? "1" : "3"
+    GLOBAL_MIN_COUNT = var.environment == "dev" ? "40" : "50"
+    WIKI_MIN_COUNT   = var.environment == "dev" ? "30" : "30"
+    DELETE_MIN_COUNT = var.environment == "dev" ? "20" : "5"
+    BLOCK_MIN_COUNT  = var.environment == "dev" ? "10" : "3"
 
     # Safety guard: do not evaluate unlimited wiki alert keys per invocation.
     MAX_WIKI_ALERT_KEYS_PER_INVOCATION = "20"
