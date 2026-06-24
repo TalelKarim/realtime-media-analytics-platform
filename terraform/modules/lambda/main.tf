@@ -24,7 +24,7 @@ resource "aws_lambda_function" "this" {
   description   = var.description
 
 
-  
+
   role    = var.role_arn
   runtime = var.runtime
   handler = var.handler

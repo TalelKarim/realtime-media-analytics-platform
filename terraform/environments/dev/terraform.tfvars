@@ -24,11 +24,11 @@ tags = {
 
 
 # ECS Fargate Collector 
-collector_image_tag                = "dev-001"
-collector_desired_count            = 1
-collector_task_cpu                 = 256
-collector_task_memory              = 512
-collector_sample_rate              = 0.01
-collector_batch_size               = 100
-collector_flush_interval_seconds   = 3
-collector_log_level                = "INFO"
+collector_image_tag              = "dev-001"
+collector_desired_count          = 1
+collector_task_cpu               = 256
+collector_task_memory            = 512
+collector_sample_rate            = 0.01
+collector_batch_size             = 100
+collector_flush_interval_seconds = 3
+collector_log_level              = "INFO"

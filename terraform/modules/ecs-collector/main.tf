@@ -5,7 +5,7 @@ locals {
   service_name = coalesce(var.service_name, "${local.name_prefix}-collector")
   task_family  = coalesce(var.task_family, "${local.name_prefix}-collector")
 
-  container_name = "collector"
+  container_name  = "collector"
   container_image = "${var.repository_url}:${var.image_tag}"
 
   common_tags = merge(

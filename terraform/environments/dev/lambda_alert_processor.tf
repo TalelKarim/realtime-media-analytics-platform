@@ -39,15 +39,15 @@ module "lambda_alert_processor" {
     EVALUATION_DELAY_SECONDS = "10"
 
     # Baseline configuration
-    BASELINE_WINDOW_MINUTES          = "30"
-    MODERATION_WINDOW_MINUTES        = "5"
-    MIN_BASELINE_POINTS              = var.environment == "dev" ? "8" : "10"
-    MIN_MODERATION_BASELINE_POINTS   = var.environment == "dev" ? "8" : "3"
+    BASELINE_WINDOW_MINUTES        = "30"
+    MODERATION_WINDOW_MINUTES      = "5"
+    MIN_BASELINE_POINTS            = var.environment == "dev" ? "8" : "10"
+    MIN_MODERATION_BASELINE_POINTS = var.environment == "dev" ? "8" : "3"
 
     # Detection thresholds
-    GLOBAL_Z_THRESHOLD                  = "2.0"
-    WIKI_Z_THRESHOLD                    = "2.0"
-    MODERATION_BURST_RATIO_THRESHOLD    = "3.0"
+    GLOBAL_Z_THRESHOLD               = "2.0"
+    WIKI_Z_THRESHOLD                 = "2.0"
+    MODERATION_BURST_RATIO_THRESHOLD = "3.0"
 
     # Minimum counts to avoid noisy alerts on tiny volumes.
     # Dev values are intentionally lower so you can observe behavior faster.
