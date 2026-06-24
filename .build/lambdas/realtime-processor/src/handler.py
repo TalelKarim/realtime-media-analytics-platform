@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import time
-from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,6 +18,7 @@ BROADCAST_QUEUE_URL = os.getenv("BROADCAST_QUEUE_URL")
 AGGREGATION_WINDOW_SECONDS = int(os.getenv("AGGREGATION_WINDOW_SECONDS", "60"))
 BROADCAST_WINDOW_SECONDS = int(os.getenv("BROADCAST_WINDOW_SECONDS", "5"))
 GLOBAL_ACTIVITY_SHARD_COUNT = int(os.getenv("GLOBAL_ACTIVITY_SHARD_COUNT", "10"))
+TOP_METRIC_SHARD_COUNT = int(os.getenv("TOP_METRIC_SHARD_COUNT", "10"))
 AGGREGATE_TTL_DAYS = int(os.getenv("AGGREGATE_TTL_DAYS", "2"))
 
 logger = logging.getLogger()
@@ -64,9 +64,21 @@ def _decode_kinesis_record(record: dict[str, Any]) -> dict[str, Any]:
     return json.loads(decoded_data)
 
 
+def _hash_int(value: str) -> int:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
+def _hash_to_shard(value: str, shard_count: int) -> int:
+    return _hash_int(value) % shard_count
+
+
+def _hash_token(value: str, length: int = 12) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
+
+
 def _compute_shard_id(event_id: str, shard_count: int) -> int:
-    digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
-    return int(digest[:8], 16) % shard_count
+    return _hash_to_shard(event_id, shard_count)
 
 
 def _safe_str(value: Any, default: str = "unknown") -> str:
@@ -80,13 +92,43 @@ def _safe_str(value: Any, default: str = "unknown") -> str:
     return text.replace("#", "_")
 
 
+def _raw_str(value: Any, default: str = "unknown") -> str:
+    if value is None:
+        return default
+
+    text = str(value).strip()
+    if not text:
+        return default
+
+    return text
+
+
+def _is_namespace_zero(namespace: Any) -> bool:
+    try:
+        return int(namespace) == 0
+    except Exception:
+        return False
+
+
 def _add_counter(
-    counters: dict[tuple[str, str], int],
+    counters: dict[tuple[str, str], dict[str, Any]],
     metric_key: str,
     window_key: str,
     amount: int = 1,
+    attrs: dict[str, Any] | None = None,
 ) -> None:
-    counters[(metric_key, window_key)] += amount
+    key = (metric_key, window_key)
+
+    if key not in counters:
+        counters[key] = {
+            "count": 0,
+            "attrs": {},
+        }
+
+    counters[key]["count"] += amount
+
+    if attrs:
+        counters[key]["attrs"].update(attrs)
 
 
 def _extract_normalized_event(envelope: dict[str, Any]) -> dict[str, Any] | None:
@@ -107,12 +149,18 @@ def _extract_normalized_event(envelope: dict[str, Any]) -> dict[str, Any] | None
 
     wiki = _safe_str(payload.get("wiki"))
     change_type = _safe_str(payload.get("change_type"))
+
     namespace = payload.get("namespace")
     namespace_key = _safe_str(namespace)
-    title = _safe_str(payload.get("title"))
+
+    title_raw = _raw_str(payload.get("title"))
+    title_key = _safe_str(title_raw)
+
+    title_url = payload.get("title_url")
+    title_url = _raw_str(title_url, default="") if title_url else None
 
     # Support both possible contract names:
-    # current collector uses "bot"; target docs may use "user_is_bot".
+    # target contract uses "user_is_bot"; older collector versions may use "bot".
     bot = payload.get("user_is_bot", payload.get("bot", False))
     is_bot = bool(bot)
 
@@ -123,13 +171,17 @@ def _extract_normalized_event(envelope: dict[str, Any]) -> dict[str, Any] | None
         "change_type": change_type,
         "namespace": namespace,
         "namespace_key": namespace_key,
-        "title": title,
+        "title": title_raw,
+        "title_key": title_key,
+        "title_url": title_url,
         "is_bot": is_bot,
     }
 
 
-def _build_counters(events: list[dict[str, Any]]) -> tuple[dict[tuple[str, str], int], set[str]]:
-    counters: dict[tuple[str, str], int] = defaultdict(int)
+def _build_counters(
+    events: list[dict[str, Any]],
+) -> tuple[dict[tuple[str, str], dict[str, Any]], set[str]]:
+    counters: dict[tuple[str, str], dict[str, Any]] = {}
     aggregation_windows: set[str] = set()
 
     for event in events:
@@ -139,70 +191,163 @@ def _build_counters(events: list[dict[str, Any]]) -> tuple[dict[tuple[str, str],
 
         aggregation_windows.add(window_start_iso)
 
-        shard_id = _compute_shard_id(
+        common_attrs = {
+            "window_start": window_start_iso,
+        }
+
+        # 1. Global activity, write-sharded by event_id.
+        global_shard_id = _compute_shard_id(
             event_id=event["event_id"],
             shard_count=GLOBAL_ACTIVITY_SHARD_COUNT,
         )
 
-        # 1. Global activity, write-sharded.
         _add_counter(
             counters,
-            metric_key=f"METRIC#GLOBAL_ACTIVITY#SHARD#{shard_id}",
+            metric_key=f"METRIC#GLOBAL_ACTIVITY#SHARD#{global_shard_id}",
             window_key=window_key,
+            attrs=common_attrs,
         )
 
-        # 2. Activity by wiki.
+        # 2. Activity by known wiki, useful for topic wiki:{wiki}.
         _add_counter(
             counters,
             metric_key=f"METRIC#WIKI_ACTIVITY#WIKI#{event['wiki']}",
             window_key=window_key,
+            attrs={
+                **common_attrs,
+                "wiki": event["wiki"],
+            },
         )
 
-        # 3. Distribution by change type.
+        # 3. Top wikis read model, sharded by wiki.
+        top_wiki_shard_id = _hash_to_shard(
+            value=event["wiki"],
+            shard_count=TOP_METRIC_SHARD_COUNT,
+        )
+
+        _add_counter(
+            counters,
+            metric_key=f"METRIC#TOP_WIKIS#SHARD#{top_wiki_shard_id}",
+            window_key=f"{window_key}#WIKI#{event['wiki']}",
+            attrs={
+                **common_attrs,
+                "wiki": event["wiki"],
+            },
+        )
+
+        # 4. Distribution by change type.
         _add_counter(
             counters,
             metric_key=f"METRIC#CHANGE_TYPE#TYPE#{event['change_type']}",
             window_key=window_key,
+            attrs={
+                **common_attrs,
+                "change_type": event["change_type"],
+            },
         )
 
-        # 4. Bot vs human.
+        # 5. Bot vs human.
+        is_bot_text = str(event["is_bot"]).lower()
+
         _add_counter(
             counters,
-            metric_key=f"METRIC#BOT_ACTIVITY#BOT#{str(event['is_bot']).lower()}",
+            metric_key=f"METRIC#BOT_ACTIVITY#BOT#{is_bot_text}",
             window_key=window_key,
+            attrs={
+                **common_attrs,
+                "is_bot": event["is_bot"],
+            },
         )
 
-        # 5. Namespace distribution.
+        # 6. Namespace distribution.
         _add_counter(
             counters,
             metric_key=f"METRIC#NAMESPACE#NS#{event['namespace_key']}",
             window_key=window_key,
+            attrs={
+                **common_attrs,
+                "namespace": event["namespace_key"],
+            },
         )
+
+        # 7. Top pages read model.
+        # Only namespace 0 represents article/content pages.
+        if _is_namespace_zero(event["namespace"]):
+            page_identity = f"{event['wiki']}#{event['title_key']}"
+            page_hash = _hash_token(page_identity)
+            top_page_shard_id = _hash_to_shard(
+                value=page_identity,
+                shard_count=TOP_METRIC_SHARD_COUNT,
+            )
+
+            _add_counter(
+                counters,
+                metric_key=f"METRIC#TOP_PAGES#SHARD#{top_page_shard_id}",
+                window_key=f"{window_key}#WIKI#{event['wiki']}#TITLE#{page_hash}",
+                attrs={
+                    **common_attrs,
+                    "wiki": event["wiki"],
+                    "title": event["title"],
+                    "title_url": event["title_url"],
+                    "namespace": event["namespace_key"],
+                    "last_change_type": event["change_type"],
+                    "last_seen_at": _to_iso_z(event["occurred_dt"]),
+                },
+            )
 
     return counters, aggregation_windows
 
 
-def _update_counter(metric_key: str, window_key: str, count: int, now_iso: str, ttl: int) -> None:
+def _update_counter(
+    metric_key: str,
+    window_key: str,
+    count: int,
+    now_iso: str,
+    ttl: int,
+    attrs: dict[str, Any] | None = None,
+) -> None:
+    expression_attribute_names = {
+        "#event_count": "event_count",
+        "#last_updated_at": "last_updated_at",
+        "#ttl": "ttl",
+    }
+
+    expression_attribute_values = {
+        ":count": count,
+        ":now": now_iso,
+        ":ttl": ttl,
+    }
+
+    set_expressions = [
+        "#last_updated_at = :now",
+        "#ttl = :ttl",
+    ]
+
+    if attrs:
+        for index, (attr_name, attr_value) in enumerate(attrs.items()):
+            if attr_value is None:
+                continue
+
+            name_token = f"#attr_{index}"
+            value_token = f":attr_{index}"
+
+            expression_attribute_names[name_token] = attr_name
+            expression_attribute_values[value_token] = attr_value
+            set_expressions.append(f"{name_token} = {value_token}")
+
+    update_expression = f"""
+        ADD #event_count :count
+        SET {", ".join(set_expressions)}
+    """
+
     table.update_item(
         Key={
             "metric_key": metric_key,
             "window_key": window_key,
         },
-        UpdateExpression="""
-            ADD #event_count :count
-            SET #last_updated_at = :now,
-                #ttl = :ttl
-        """,
-        ExpressionAttributeNames={
-            "#event_count": "event_count",
-            "#last_updated_at": "last_updated_at",
-            "#ttl": "ttl",
-        },
-        ExpressionAttributeValues={
-            ":count": count,
-            ":now": now_iso,
-            ":ttl": ttl,
-        },
+        UpdateExpression=update_expression,
+        ExpressionAttributeNames=expression_attribute_names,
+        ExpressionAttributeValues=expression_attribute_values,
     )
 
 
@@ -311,13 +456,14 @@ def lambda_handler(event, context):
 
     dynamodb_update_count = 0
 
-    for (metric_key, window_key), count in counters.items():
+    for (metric_key, window_key), counter_data in counters.items():
         _update_counter(
             metric_key=metric_key,
             window_key=window_key,
-            count=count,
+            count=counter_data["count"],
             now_iso=now_iso,
             ttl=ttl,
+            attrs=counter_data.get("attrs", {}),
         )
         dynamodb_update_count += 1
 
