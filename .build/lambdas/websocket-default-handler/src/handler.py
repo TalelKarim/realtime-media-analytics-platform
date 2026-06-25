@@ -128,6 +128,7 @@ def _update_topics(connection_id: str, topics: list) -> None:
             "connection_id": connection_id,
         },
         UpdateExpression="SET topics = :topics",
+        ConditionExpression="attribute_exists(connection_id)",
         ExpressionAttributeValues={
             ":topics": topics,
         },
