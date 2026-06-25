@@ -13,6 +13,9 @@ module "apigw_websocket" {
   data_trace_enabled           = true
   detailed_metrics_enabled     = true
 
+  throttling_rate_limit  = 100
+  throttling_burst_limit = 50
+
   routes = {
     "$connect" = {
       lambda_function_name = module.lambda_websocket_connect.function_name
@@ -31,7 +34,7 @@ module "apigw_websocket" {
   }
 
   tags = var.tags
-  
+
   depends_on = [
     aws_api_gateway_account.this
   ]

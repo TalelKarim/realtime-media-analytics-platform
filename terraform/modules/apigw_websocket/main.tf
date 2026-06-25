@@ -65,6 +65,8 @@ resource "aws_apigatewayv2_stage" "this" {
     logging_level            = var.logging_level
     data_trace_enabled       = var.data_trace_enabled
     detailed_metrics_enabled = var.detailed_metrics_enabled
+    throttling_rate_limit  = var.throttling_rate_limit
+    throttling_burst_limit = var.throttling_burst_limit
   }
 
   dynamic "access_log_settings" {

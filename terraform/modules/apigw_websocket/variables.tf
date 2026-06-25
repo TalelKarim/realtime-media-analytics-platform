@@ -75,3 +75,16 @@ variable "detailed_metrics_enabled" {
   type        = bool
   default     = true
 }
+
+
+variable "throttling_rate_limit" {
+  description = "Default WebSocket route throttling rate limit."
+  type        = number
+  default     = 100
+}
+
+variable "throttling_burst_limit" {
+  description = "Default WebSocket route throttling burst limit."
+  type        = number
+  default     = 50
+}
