@@ -17,6 +17,18 @@ locals {
   }
 }
 
+
+resource "aws_cloudwatch_log_group" "access" {
+  count = var.enable_access_logs ? 1 : 0
+
+  name              = "/aws/apigateway/${var.name}"
+  retention_in_days = var.access_log_retention_in_days
+
+  tags = var.tags
+}
+
+
+
 resource "aws_apigatewayv2_api" "this" {
   name                       = var.name
   protocol_type              = "WEBSOCKET"
@@ -48,6 +60,37 @@ resource "aws_apigatewayv2_stage" "this" {
 
   name        = var.stage_name
   auto_deploy = var.auto_deploy
+
+  default_route_settings {
+    logging_level            = var.logging_level
+    data_trace_enabled       = var.data_trace_enabled
+    detailed_metrics_enabled = var.detailed_metrics_enabled
+  }
+
+  dynamic "access_log_settings" {
+    for_each = var.enable_access_logs ? [1] : []
+
+    content {
+      destination_arn = aws_cloudwatch_log_group.access[0].arn
+
+      format = jsonencode({
+        requestId              = "$context.requestId"
+        extendedRequestId      = "$context.extendedRequestId"
+        ip                     = "$context.identity.sourceIp"
+        requestTime            = "$context.requestTime"
+        routeKey               = "$context.routeKey"
+        eventType              = "$context.eventType"
+        connectionId           = "$context.connectionId"
+        status                 = "$context.status"
+        integrationStatus      = "$context.integrationStatus"
+        integrationError       = "$context.integrationErrorMessage"
+        errorMessage           = "$context.error.message"
+        errorResponseType      = "$context.error.responseType"
+        integrationLatency     = "$context.integrationLatency"
+        responseLatency        = "$context.responseLatency"
+      })
+    }
+  }
 
   tags = var.tags
 }

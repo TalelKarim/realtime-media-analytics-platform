@@ -38,3 +38,40 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+
+
+variable "enable_access_logs" {
+  description = "Whether to enable API Gateway WebSocket access logs."
+  type        = bool
+  default     = true
+}
+
+variable "access_log_retention_in_days" {
+  description = "CloudWatch retention in days for API Gateway WebSocket access logs."
+  type        = number
+  default     = 14
+}
+
+variable "logging_level" {
+  description = "WebSocket route execution logging level. Valid values: OFF, ERROR, INFO."
+  type        = string
+  default     = "INFO"
+
+  validation {
+    condition     = contains(["OFF", "ERROR", "INFO"], var.logging_level)
+    error_message = "logging_level must be one of: OFF, ERROR, INFO."
+  }
+}
+
+variable "data_trace_enabled" {
+  description = "Whether to enable full request/response data tracing for WebSocket routes."
+  type        = bool
+  default     = false
+}
+
+variable "detailed_metrics_enabled" {
+  description = "Whether to enable detailed CloudWatch metrics for WebSocket routes."
+  type        = bool
+  default     = true
+}

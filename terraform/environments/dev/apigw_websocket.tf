@@ -7,6 +7,12 @@ module "apigw_websocket" {
   route_selection_expression = "$request.body.action"
   auto_deploy                = true
 
+  enable_access_logs           = true
+  access_log_retention_in_days = 14
+  logging_level                = "INFO"
+  data_trace_enabled           = true
+  detailed_metrics_enabled     = true
+
   routes = {
     "$connect" = {
       lambda_function_name = module.lambda_websocket_connect.function_name
