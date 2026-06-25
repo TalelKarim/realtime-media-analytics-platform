@@ -362,6 +362,7 @@ resource "aws_iam_role_policy" "websocket_connect" {
         Action = [
           "kms:Encrypt",
           "kms:GenerateDataKey",
+          "kms:Decrypt",
           "kms:DescribeKey"
         ]
         Resource = var.dynamodb_key_arn
