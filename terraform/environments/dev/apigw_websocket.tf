@@ -31,4 +31,8 @@ module "apigw_websocket" {
   }
 
   tags = var.tags
+  
+  depends_on = [
+    aws_api_gateway_account.this
+  ]
 }
