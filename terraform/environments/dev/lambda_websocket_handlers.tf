@@ -4,7 +4,7 @@ module "lambda_websocket_connect" {
   function_name = "${local.name_prefix}-websocket-connect"
   description   = "Handles API Gateway WebSocket $connect route."
 
-  runtime = "python3.11"
+  runtime = "python3.12"
   handler = "src.handler.lambda_handler"
 
   source_dir = "${path.root}/../../../.build/lambdas/websocket-connect-handler"
@@ -34,7 +34,7 @@ module "lambda_websocket_disconnect" {
   function_name = "${local.name_prefix}-websocket-disconnect"
   description   = "Handles API Gateway WebSocket $disconnect route."
 
-  runtime = "python3.11"
+  runtime = "python3.12"
   handler = "src.handler.lambda_handler"
 
   source_dir = "${path.root}/../../../.build/lambdas/websocket-disconnect-handler"
@@ -62,7 +62,7 @@ module "lambda_websocket_default" {
   function_name = "${local.name_prefix}-websocket-default"
   description   = "Handles API Gateway WebSocket $default route for subscribe and unsubscribe messages."
 
-  runtime = "python3.11"
+  runtime = "python3.12"
   handler = "src.handler.lambda_handler"
 
   source_dir = "${path.root}/../../../.build/lambdas/websocket-default-handler"

@@ -8,7 +8,7 @@ module "lambda_alert_processor" {
   function_name = "${local.name_prefix}-alert-processor"
   description   = "Consumes Wikimedia events from Kinesis, writes alert_state counters, detects anomalies, and publishes SNS alerts."
 
-  runtime = "python3.11"
+  runtime = "python3.12"
   handler = "src.handler.lambda_handler"
 
   source_dir = "${path.root}/../../../.build/lambdas/alert-processor"
