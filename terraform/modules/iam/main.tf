@@ -412,6 +412,7 @@ resource "aws_iam_role_policy" "websocket_default" {
         Action = [
           "dynamodb:GetItem",
           "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
           "dynamodb:DescribeTable"
         ]
         Resource = local.websocket_connections_table_arn
