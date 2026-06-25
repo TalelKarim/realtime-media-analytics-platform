@@ -240,3 +240,26 @@ output "ecs_collector_container_image" {
   description = "Collector container image configured in task definition"
   value       = module.ecs_collector.container_image
 }
+
+
+# websocket outputs 
+
+output "websocket_api_id" {
+  description = "API Gateway WebSocket API ID."
+  value       = module.apigw_websocket.api_id
+}
+
+output "websocket_api_endpoint" {
+  description = "API Gateway WebSocket API endpoint without stage."
+  value       = module.apigw_websocket.api_endpoint
+}
+
+output "websocket_url" {
+  description = "API Gateway WebSocket URL including stage."
+  value       = module.apigw_websocket.invoke_url
+}
+
+output "websocket_manage_connections_arn" {
+  description = "ARN used by Lambdas to manage WebSocket connections."
+  value       = module.apigw_websocket.manage_connections_arn
+}
