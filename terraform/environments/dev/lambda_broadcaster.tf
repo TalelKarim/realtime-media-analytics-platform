@@ -16,14 +16,15 @@ module "lambda_broadcaster" {
 
   environment_variables = {
     ENVIRONMENT = var.environment
-    LOG_LEVEL   = "INFO"
-
-    REALTIME_AGGREGATES_TABLE_NAME   = "${local.name_prefix}-realtime-aggregates"
-    WEBSOCKET_CONNECTIONS_TABLE_NAME = "${local.name_prefix}-websocket-connections"
-
-    WEBSOCKET_MANAGEMENT_ENDPOINT = replace(module.apigw_websocket.invoke_url, "wss://", "https://")
-
-    BROADCAST_SIGNAL_QUEUE_URL = module.sqs.broadcast_signal_queue_url
+    AGGREGATES_TABLE_NAME=module.dynamodb.alert_state_table_name
+    CONNECTIONS_TABLE_NAME=module.dynamodb.websocket_connections_table_name
+    WEBSOCKET_ENDPOINT_URL=module.apigw_websocket.api_endpoint
+    GLOBAL_ACTIVITY_SHARD_COUNT=10
+    TOP_METRIC_SHARD_COUNT=10
+    TOP_WIKIS_LIMIT=10
+    TOP_PAGES_LIMIT=10
+    ENABLE_TOP_PAGES_TOPIC=true
+    LOG_LEVEL=INFO
   }
 
   tags = var.tags
