@@ -24,7 +24,7 @@ module "lambda_broadcaster" {
     TOP_WIKIS_LIMIT=10
     TOP_PAGES_LIMIT=10
     ENABLE_TOP_PAGES_TOPIC=true
-    LOG_LEVEL=INFO
+    LOG_LEVEL="INFO"
   }
 
   tags = var.tags
