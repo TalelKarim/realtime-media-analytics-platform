@@ -23,6 +23,16 @@ output "invoke_url" {
   value       = aws_apigatewayv2_stage.this.invoke_url
 }
 
+output "management_endpoint_url" {
+  description = "HTTPS endpoint used by Lambda Broadcaster for API Gateway Management API. Do not include /@connections."
+  value       = replace(trimsuffix(aws_apigatewayv2_stage.this.invoke_url, "/"), "wss://", "https://")
+}
+
+output "connections_url" {
+  description = "Full @connections URL shown by API Gateway console. Not used directly as boto3 endpoint_url."
+  value       = "${replace(trimsuffix(aws_apigatewayv2_stage.this.invoke_url, "/"), "wss://", "https://")}/@connections"
+}
+
 output "manage_connections_arn" {
   description = "ARN used by Lambdas to manage WebSocket connections."
   value       = "${aws_apigatewayv2_api.this.execution_arn}/${aws_apigatewayv2_stage.this.name}/POST/@connections/*"
