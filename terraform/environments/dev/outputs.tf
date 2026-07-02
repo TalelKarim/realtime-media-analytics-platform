@@ -303,3 +303,28 @@ output "glue_bronze_table_name" {
 output "glue_bronze_s3_location" {
   value = module.glue_catalog.bronze_s3_location
 }
+
+
+output "glue_silver_table_name" {
+  value = module.glue_catalog.silver_table_name
+}
+
+output "glue_silver_s3_location" {
+  value = module.glue_catalog.silver_s3_location
+}
+
+
+
+# Glue ETL
+
+output "glue_bronze_to_silver_job_name" {
+  value = module.glue_etl.bronze_to_silver_job_name
+}
+
+output "glue_etl_bronze_base_path" {
+  value = module.glue_etl.bronze_base_path
+}
+
+output "glue_etl_silver_base_path" {
+  value = module.glue_etl.silver_base_path
+}

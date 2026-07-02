@@ -1,5 +1,6 @@
 locals {
   bronze_s3_location = "s3://${var.datalake_bucket_name}/bronze/wikimedia/recentchange/"
+  silver_s3_location = "s3://${var.datalake_bucket_name}/silver/wikimedia/recentchange/"
 
   payload_type = "struct<wikimedia_recentchange_id:bigint,wiki:string,domain:string,stream:string,request_id:string,topic:string,partition:int,offset:bigint,change_type:string,namespace:int,title:string,title_url:string,user:string,user_is_bot:boolean,bot:boolean,is_minor:boolean,minor:boolean,is_patrolled:boolean,patrolled:boolean,comment:string,parsedcomment:string,source_timestamp:bigint,old_length:bigint,new_length:bigint,delta_bytes:bigint,length_old:bigint,length_new:bigint,length_delta:bigint,revision_old:bigint,revision_new:bigint,change_url:string,raw_notify_url:string,server_url:string,server_name:string,server_script_path:string,log_type:string,log_action:string>"
 
@@ -129,5 +130,163 @@ resource "aws_glue_catalog_table" "bronze_recentchange" {
   partition_keys {
     name = "hour"
     type = "int"
+  }
+}
+
+
+resource "aws_glue_catalog_table" "silver_recentchange" {
+  name          = "wikimedia_silver_recentchange"
+  database_name = aws_glue_catalog_database.this.name
+  table_type    = "EXTERNAL_TABLE"
+
+  description = "Silver Wikimedia recentchange events cleaned and stored as Parquet SNAPPY."
+
+  parameters = {
+    EXTERNAL        = "TRUE"
+    classification  = "parquet"
+    compressionType = "snappy"
+    typeOfData      = "file"
+
+    "projection.enabled" = "true"
+
+    "projection.ingestion_date.type"     = "date"
+    "projection.ingestion_date.range"    = "2026-01-01,NOW"
+    "projection.ingestion_date.format"   = "yyyy-MM-dd"
+    "projection.ingestion_date.interval" = "1"
+    "projection.ingestion_date.interval.unit" = "DAYS"
+
+    "storage.location.template" = "s3://${var.datalake_bucket_name}/silver/wikimedia/recentchange/ingestion_date=$${ingestion_date}/"
+  }
+
+  storage_descriptor {
+    location      = local.silver_s3_location
+    input_format  = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+    compressed    = true
+
+    ser_de_info {
+      name                  = "parquet-serde"
+      serialization_library = "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+    }
+
+    columns {
+      name = "event_id"
+      type = "string"
+    }
+
+    columns {
+      name = "occurred_at"
+      type = "timestamp"
+    }
+
+    columns {
+      name = "wiki"
+      type = "string"
+    }
+
+    columns {
+      name = "domain"
+      type = "string"
+    }
+
+    columns {
+      name = "change_type"
+      type = "string"
+    }
+
+    columns {
+      name = "namespace"
+      type = "int"
+    }
+
+    columns {
+      name = "title"
+      type = "string"
+    }
+
+    columns {
+      name = "title_url"
+      type = "string"
+    }
+
+    columns {
+      name = "user"
+      type = "string"
+    }
+
+    columns {
+      name = "user_is_bot"
+      type = "boolean"
+    }
+
+    columns {
+      name = "is_minor"
+      type = "boolean"
+    }
+
+    columns {
+      name = "is_patrolled"
+      type = "boolean"
+    }
+
+    columns {
+      name = "old_length"
+      type = "bigint"
+    }
+
+    columns {
+      name = "new_length"
+      type = "bigint"
+    }
+
+    columns {
+      name = "delta_bytes"
+      type = "bigint"
+    }
+
+    columns {
+      name = "revision_old"
+      type = "bigint"
+    }
+
+    columns {
+      name = "revision_new"
+      type = "bigint"
+    }
+
+    columns {
+      name = "change_url"
+      type = "string"
+    }
+
+    columns {
+      name = "raw_notify_url"
+      type = "string"
+    }
+
+    columns {
+      name = "log_type"
+      type = "string"
+    }
+
+    columns {
+      name = "log_action"
+      type = "string"
+    }
+
+    columns {
+      name = "log_params"
+      type = "string"
+    }
+
+    columns {
+      name = "wikimedia_rcid"
+      type = "bigint"
+    }
+  }
+
+  partition_keys {
+    name = "ingestion_date"
+    type = "date"
   }
 }
