@@ -21,7 +21,7 @@ variable "s3_kms_key_arn" {
 variable "bronze_to_silver_script_path" {
   description = "Local path to the Bronze to Silver Glue script."
   type        = string
-  default     = "glue/jobs/bronze_to_silver/bronze_to_silver.py"
+  default     = "../glue/jobs/bronze_to_silver/bronze_to_silver.py"
 }
 
 variable "glue_version" {
