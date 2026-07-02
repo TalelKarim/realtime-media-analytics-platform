@@ -77,6 +77,10 @@ resource "aws_kinesis_firehose_delivery_stream" "this" {
 
       processors {
         type = "AppendDelimiterToRecord"
+          parameters {
+            parameter_name  = "Delimiter"
+            parameter_value = "\\n"
+        }
       }
     }
   }
