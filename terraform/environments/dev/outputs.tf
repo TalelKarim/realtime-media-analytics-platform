@@ -287,3 +287,19 @@ output "firehose_wikimedia_bronze_s3_prefix" {
   description = "S3 Bronze prefix used by Firehose."
   value       = module.firehose_wikimedia_bronze.s3_prefix
 }
+
+
+
+# Glue outputs
+
+output "glue_database_name" {
+  value = module.glue_catalog.database_name
+}
+
+output "glue_bronze_table_name" {
+  value = module.glue_catalog.bronze_table_name
+}
+
+output "glue_bronze_s3_location" {
+  value = module.glue_catalog.bronze_s3_location
+}
