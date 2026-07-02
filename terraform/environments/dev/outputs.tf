@@ -263,3 +263,27 @@ output "websocket_manage_connections_arn" {
   description = "ARN used by Lambdas to manage WebSocket connections."
   value       = module.apigw_websocket.manage_connections_arn
 }
+
+
+
+# Outputs firehose 
+
+output "firehose_wikimedia_bronze_name" {
+  description = "Firehose stream delivering Wikimedia envelopes to S3 Bronze."
+  value       = module.firehose_wikimedia_bronze.delivery_stream_name
+}
+
+output "firehose_wikimedia_bronze_arn" {
+  description = "Firehose stream ARN."
+  value       = module.firehose_wikimedia_bronze.delivery_stream_arn
+}
+
+output "firehose_wikimedia_bronze_log_group" {
+  description = "Firehose CloudWatch log group."
+  value       = module.firehose_wikimedia_bronze.log_group_name
+}
+
+output "firehose_wikimedia_bronze_s3_prefix" {
+  description = "S3 Bronze prefix used by Firehose."
+  value       = module.firehose_wikimedia_bronze.s3_prefix
+}

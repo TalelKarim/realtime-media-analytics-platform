@@ -555,6 +555,18 @@ resource "aws_iam_role_policy" "firehose" {
           var.kinesis_key_arn,
           var.s3_key_arn
         ]
+      },
+      {
+        Sid    = "WriteFirehoseLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:PutLogEvents",
+          "logs:CreateLogStream",
+          "logs:DescribeLogStreams"
+        ]
+        Resource = [
+          "arn:${data.aws_partition.current.partition}:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/aws/kinesisfirehose/${local.name_prefix}-wikimedia-bronze:*"
+        ]
       }
     ]
   })

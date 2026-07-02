@@ -15,16 +15,16 @@ module "lambda_broadcaster" {
   memory_size = 256
 
   environment_variables = {
-    ENVIRONMENT = var.environment
-    AGGREGATES_TABLE_NAME=module.dynamodb.realtime_aggregates_table_name
-    CONNECTIONS_TABLE_NAME=module.dynamodb.websocket_connections_table_name
-    WEBSOCKET_ENDPOINT_URL=module.apigw_websocket.management_endpoint_url
-    GLOBAL_ACTIVITY_SHARD_COUNT=10
-    TOP_METRIC_SHARD_COUNT=10
-    TOP_WIKIS_LIMIT=10
-    TOP_PAGES_LIMIT=10
-    ENABLE_TOP_PAGES_TOPIC=true
-    LOG_LEVEL="INFO"
+    ENVIRONMENT                 = var.environment
+    AGGREGATES_TABLE_NAME       = module.dynamodb.realtime_aggregates_table_name
+    CONNECTIONS_TABLE_NAME      = module.dynamodb.websocket_connections_table_name
+    WEBSOCKET_ENDPOINT_URL      = module.apigw_websocket.management_endpoint_url
+    GLOBAL_ACTIVITY_SHARD_COUNT = 10
+    TOP_METRIC_SHARD_COUNT      = 10
+    TOP_WIKIS_LIMIT             = 10
+    TOP_PAGES_LIMIT             = 10
+    ENABLE_TOP_PAGES_TOPIC      = true
+    LOG_LEVEL                   = "INFO"
   }
 
   tags = var.tags
