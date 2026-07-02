@@ -1,5 +1,5 @@
 module "firehose_wikimedia_bronze" {
-  source = "./modules/firehose_kinesis_to_s3"
+  source = "../../modules/firehose_kinesis_to_s3"
 
   name = "${local.name_prefix}-wikimedia-bronze"
 
