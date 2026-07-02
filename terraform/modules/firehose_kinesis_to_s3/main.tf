@@ -51,35 +51,22 @@ resource "aws_kinesis_firehose_delivery_stream" "this" {
         type = "MetadataExtraction"
 
         parameters {
-          parameter_name  = "JsonParsingEngine"
-          parameter_value = "JQ-1.6"
+          parameter_name  = "MetadataExtractionQuery"
+          parameter_value = "{year:.occurred_at[0:4],month:.occurred_at[5:7],day:.occurred_at[8:10],hour:.occurred_at[11:13]}"
         }
 
         parameters {
-          parameter_name = "MetadataExtractionQuery"
-
-          # We extract the partition values directly from occurred_at:
-          # occurred_at = 2026-07-02T16:37:22Z
-          # year  = 2026
-          # month = 07
-          # day   = 02
-          # hour  = 16
-          parameter_value = <<-EOT
-          {
-            year: .occurred_at[0:4],
-            month: .occurred_at[5:7],
-            day: .occurred_at[8:10],
-            hour: .occurred_at[11:13]
-          }
-          EOT
+          parameter_name  = "JsonParsingEngine"
+          parameter_value = "JQ-1.6"
         }
       }
 
       processors {
         type = "AppendDelimiterToRecord"
-          parameters {
-            parameter_name  = "Delimiter"
-            parameter_value = "\\n"
+
+        parameters {
+          parameter_name  = "Delimiter"
+          parameter_value = "\\n"
         }
       }
     }
