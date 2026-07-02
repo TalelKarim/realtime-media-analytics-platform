@@ -1,19 +1,19 @@
 locals {
-  bronze_base_path = "s3://${var.datalake_bucket_name}/bronze/wikimedia/recentchange"
-  silver_base_path = "s3://${var.datalake_bucket_name}/silver/wikimedia/recentchange"
+  bronze_base_path  = "s3://${var.datalake_bucket_name}/bronze/wikimedia/recentchange"
+  silver_base_path  = "s3://${var.datalake_bucket_name}/silver/wikimedia/recentchange"
+  script_local_path = "${path.module}/scripts/bronze_to_silver.py"
 
-  script_s3_key      = "glue/scripts/bronze_to_silver.py"
-  temp_dir           = "s3://${var.datalake_bucket_name}/glue/temp/"
-  spark_event_logs   = "s3://${var.datalake_bucket_name}/glue/spark-event-logs/"
+  script_s3_key    = "glue/scripts/bronze_to_silver.py"
+  temp_dir         = "s3://${var.datalake_bucket_name}/glue/temp/"
+  spark_event_logs = "s3://${var.datalake_bucket_name}/glue/spark-event-logs/"
 }
 
 resource "aws_s3_object" "bronze_to_silver_script" {
   bucket = var.datalake_bucket_name
   key    = local.script_s3_key
-  source = var.bronze_to_silver_script_path
 
-  source_hash = filemd5(var.bronze_to_silver_script_path)
-
+  source                 = local.script_local_path
+  source_hash            = filemd5(local.script_local_path)
   server_side_encryption = "aws:kms"
   kms_key_id             = var.s3_kms_key_arn
 
