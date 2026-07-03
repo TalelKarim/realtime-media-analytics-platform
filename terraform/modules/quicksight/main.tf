@@ -129,6 +129,83 @@ locals {
   ]
 }
 
+
+
+
+data "aws_iam_role" "quicksight_service_role" {
+  name = var.quicksight_service_role_name
+}
+
+data "aws_iam_policy_document" "quicksight_athena_s3_access" {
+  statement {
+    sid    = "ListDataLakeBucket"
+    effect = "Allow"
+
+    actions = [
+      "s3:GetBucketLocation",
+      "s3:ListBucket",
+      "s3:ListBucketMultipartUploads"
+    ]
+
+    resources = [
+      var.datalake_bucket_arn
+    ]
+  }
+
+  statement {
+    sid    = "ReadGoldData"
+    effect = "Allow"
+
+    actions = [
+      "s3:GetObject"
+    ]
+
+    resources = [
+      "${var.datalake_bucket_arn}/gold/*"
+    ]
+  }
+
+  statement {
+    sid    = "ReadWriteAthenaQueryResults"
+    effect = "Allow"
+
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+      "s3:AbortMultipartUpload",
+      "s3:ListMultipartUploadParts"
+    ]
+
+    resources = [
+      "${var.datalake_bucket_arn}/athena-results/quicksight/*"
+    ]
+  }
+
+  statement {
+    sid    = "UseDataLakeKmsKey"
+    effect = "Allow"
+
+    actions = [
+      "kms:Decrypt",
+      "kms:Encrypt",
+      "kms:GenerateDataKey",
+      "kms:DescribeKey"
+    ]
+
+    resources = [
+      var.s3_kms_key_arn
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "quicksight_athena_s3_access" {
+  name   = "${var.name_prefix}-quicksight-athena-s3-access"
+  role   = data.aws_iam_role.quicksight_service_role.id
+  policy = data.aws_iam_policy_document.quicksight_athena_s3_access.json
+}
+
+
 resource "aws_athena_workgroup" "quicksight" {
   name = "${var.name_prefix}-quicksight"
 

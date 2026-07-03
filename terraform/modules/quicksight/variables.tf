@@ -33,3 +33,15 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+
+variable "datalake_bucket_arn" {
+  description = "Data lake bucket ARN."
+  type        = string
+}
+
+variable "quicksight_service_role_name" {
+  description = "IAM role used by QuickSight to access Athena/S3."
+  type        = string
+  default     = "aws-quicksight-service-role-v0"
+}
