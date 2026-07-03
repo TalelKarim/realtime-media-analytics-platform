@@ -1,13 +1,3 @@
-locals {
-  bronze_s3_location = "s3://${var.datalake_bucket_name}/bronze/wikimedia/recentchange/"
-  silver_s3_location = "s3://${var.datalake_bucket_name}/silver/wikimedia/recentchange/"
-
-  payload_type = "struct<wikimedia_recentchange_id:bigint,wiki:string,domain:string,stream:string,request_id:string,topic:string,partition:int,offset:bigint,change_type:string,namespace:int,title:string,title_url:string,user:string,user_is_bot:boolean,bot:boolean,is_minor:boolean,minor:boolean,is_patrolled:boolean,patrolled:boolean,comment:string,parsedcomment:string,source_timestamp:bigint,old_length:bigint,new_length:bigint,delta_bytes:bigint,length_old:bigint,length_new:bigint,length_delta:bigint,revision_old:bigint,revision_new:bigint,change_url:string,raw_notify_url:string,server_url:string,server_name:string,server_script_path:string,log_type:string,log_action:string>"
-
-  raw_event_type = "struct<meta:struct<uri:string,request_id:string,id:string,domain:string,stream:string,dt:string,topic:string,partition:int,offset:bigint>,id:bigint,type:string,namespace:int,title:string,title_url:string,comment:string,timestamp:bigint,user:string,bot:boolean,notify_url:string,minor:boolean,patrolled:boolean,server_url:string,server_name:string,server_script_path:string,wiki:string,parsedcomment:string,log_id:bigint,log_type:string,log_action:string,log_action_comment:string>"
-}
-
-
 
 locals {
 

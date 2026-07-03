@@ -1,5 +1,5 @@
 module "glue_etl" {
-  source = "./modules/glue_etl"
+  source = "../../modules/glue_etl"
 
   name_prefix          = local.name_prefix
   datalake_bucket_name = module.data_lake.bucket_name
