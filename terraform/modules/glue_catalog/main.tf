@@ -7,6 +7,125 @@ locals {
   raw_event_type = "struct<meta:struct<uri:string,request_id:string,id:string,domain:string,stream:string,dt:string,topic:string,partition:int,offset:bigint>,id:bigint,type:string,namespace:int,title:string,title_url:string,comment:string,timestamp:bigint,user:string,bot:boolean,notify_url:string,minor:boolean,patrolled:boolean,server_url:string,server_name:string,server_script_path:string,wiki:string,parsedcomment:string,log_id:bigint,log_type:string,log_action:string,log_action_comment:string>"
 }
 
+
+
+locals {
+
+
+  bronze_s3_location = "s3://${var.datalake_bucket_name}/bronze/wikimedia/recentchange/"
+  silver_s3_location = "s3://${var.datalake_bucket_name}/silver/wikimedia/recentchange/"
+
+  payload_type = "struct<wikimedia_recentchange_id:bigint,wiki:string,domain:string,stream:string,request_id:string,topic:string,partition:int,offset:bigint,change_type:string,namespace:int,title:string,title_url:string,user:string,user_is_bot:boolean,bot:boolean,is_minor:boolean,minor:boolean,is_patrolled:boolean,patrolled:boolean,comment:string,parsedcomment:string,source_timestamp:bigint,old_length:bigint,new_length:bigint,delta_bytes:bigint,length_old:bigint,length_new:bigint,length_delta:bigint,revision_old:bigint,revision_new:bigint,change_url:string,raw_notify_url:string,server_url:string,server_name:string,server_script_path:string,log_type:string,log_action:string>"
+
+  raw_event_type = "struct<meta:struct<uri:string,request_id:string,id:string,domain:string,stream:string,dt:string,topic:string,partition:int,offset:bigint>,id:bigint,type:string,namespace:int,title:string,title_url:string,comment:string,timestamp:bigint,user:string,bot:boolean,notify_url:string,minor:boolean,patrolled:boolean,server_url:string,server_name:string,server_script_path:string,wiki:string,parsedcomment:string,log_id:bigint,log_type:string,log_action:string,log_action_comment:string>"
+
+  gold_s3_location = "s3://${var.datalake_bucket_name}/gold/"
+
+  hourly_projection_parameters = {
+    "projection.enabled" = "true"
+
+    "projection.year.type"   = "integer"
+    "projection.year.range"  = "2026,2030"
+    "projection.year.digits" = "4"
+
+    "projection.month.type"   = "integer"
+    "projection.month.range"  = "1,12"
+    "projection.month.digits" = "2"
+
+    "projection.day.type"   = "integer"
+    "projection.day.range"  = "1,31"
+    "projection.day.digits" = "2"
+
+    "projection.hour.type"   = "integer"
+    "projection.hour.range"  = "0,23"
+    "projection.hour.digits" = "2"
+  }
+
+  gold_tables = {
+    wiki_activity_by_hour = {
+      table_name  = "wikimedia_gold_wiki_activity_by_hour"
+      s3_prefix   = "wiki_activity_by_hour"
+      description = "Hourly event activity by Wikimedia wiki."
+
+      columns = [
+        { name = "metric_date", type = "date" },
+        { name = "metric_hour", type = "timestamp" },
+        { name = "wiki", type = "string" },
+        { name = "event_count", type = "bigint" },
+        { name = "bot_event_count", type = "bigint" },
+        { name = "human_event_count", type = "bigint" },
+        { name = "distinct_titles", type = "bigint" },
+        { name = "first_event_at", type = "timestamp" },
+        { name = "last_event_at", type = "timestamp" }
+      ]
+    }
+
+    change_type_by_hour = {
+      table_name  = "wikimedia_gold_change_type_by_hour"
+      s3_prefix   = "change_type_by_hour"
+      description = "Hourly Wikimedia event distribution by change type."
+
+      columns = [
+        { name = "metric_date", type = "date" },
+        { name = "metric_hour", type = "timestamp" },
+        { name = "change_type", type = "string" },
+        { name = "event_count", type = "bigint" },
+        { name = "first_event_at", type = "timestamp" },
+        { name = "last_event_at", type = "timestamp" }
+      ]
+    }
+
+    bot_activity_by_hour = {
+      table_name  = "wikimedia_gold_bot_activity_by_hour"
+      s3_prefix   = "bot_activity_by_hour"
+      description = "Hourly Wikimedia event distribution by bot versus human users."
+
+      columns = [
+        { name = "metric_date", type = "date" },
+        { name = "metric_hour", type = "timestamp" },
+        { name = "user_is_bot", type = "boolean" },
+        { name = "event_count", type = "bigint" },
+        { name = "first_event_at", type = "timestamp" },
+        { name = "last_event_at", type = "timestamp" }
+      ]
+    }
+
+    namespace_activity_by_hour = {
+      table_name  = "wikimedia_gold_namespace_activity_by_hour"
+      s3_prefix   = "namespace_activity_by_hour"
+      description = "Hourly Wikimedia event distribution by namespace."
+
+      columns = [
+        { name = "metric_date", type = "date" },
+        { name = "metric_hour", type = "timestamp" },
+        { name = "namespace", type = "int" },
+        { name = "event_count", type = "bigint" },
+        { name = "first_event_at", type = "timestamp" },
+        { name = "last_event_at", type = "timestamp" }
+      ]
+    }
+
+    top_pages_by_hour = {
+      table_name  = "wikimedia_gold_top_pages_by_hour"
+      s3_prefix   = "top_pages_by_hour"
+      description = "Top Wikimedia pages by hourly event count."
+
+      columns = [
+        { name = "metric_date", type = "date" },
+        { name = "metric_hour", type = "timestamp" },
+        { name = "page_rank", type = "int" },
+        { name = "wiki", type = "string" },
+        { name = "namespace", type = "int" },
+        { name = "title", type = "string" },
+        { name = "event_count", type = "bigint" },
+        { name = "bot_event_count", type = "bigint" },
+        { name = "human_event_count", type = "bigint" },
+        { name = "first_event_at", type = "timestamp" },
+        { name = "last_event_at", type = "timestamp" }
+      ]
+    }
+  }
+}
 resource "aws_glue_catalog_database" "this" {
   name        = var.database_name
   description = "Data Catalog database for Realtime Media Analytics Platform."
@@ -296,6 +415,71 @@ resource "aws_glue_catalog_table" "silver_recentchange" {
     columns {
       name = "wikimedia_rcid"
       type = "bigint"
+    }
+  }
+
+  partition_keys {
+    name = "year"
+    type = "int"
+  }
+
+  partition_keys {
+    name = "month"
+    type = "int"
+  }
+
+  partition_keys {
+    name = "day"
+    type = "int"
+  }
+
+  partition_keys {
+    name = "hour"
+    type = "int"
+  }
+}
+
+
+
+resource "aws_glue_catalog_table" "gold" {
+  for_each = local.gold_tables
+
+  name          = each.value.table_name
+  database_name = aws_glue_catalog_database.this.name
+  table_type    = "EXTERNAL_TABLE"
+
+  description = each.value.description
+
+  parameters = merge(
+    {
+      EXTERNAL        = "TRUE"
+      classification  = "parquet"
+      compressionType = "snappy"
+      typeOfData      = "file"
+
+      "storage.location.template" = "s3://${var.datalake_bucket_name}/gold/${each.value.s3_prefix}/year=$${year}/month=$${month}/day=$${day}/hour=$${hour}/"
+    },
+    local.hourly_projection_parameters
+  )
+
+  storage_descriptor {
+    location      = "s3://${var.datalake_bucket_name}/gold/${each.value.s3_prefix}/"
+    input_format  = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+    compressed    = true
+
+    ser_de_info {
+      name                  = "parquet-serde"
+      serialization_library = "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+    }
+
+    dynamic "columns" {
+      for_each = each.value.columns
+
+      content {
+        name = columns.value.name
+        type = columns.value.type
+      }
     }
   }
 

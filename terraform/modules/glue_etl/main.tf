@@ -1,25 +1,54 @@
 locals {
-  bronze_base_path  = "s3://${var.datalake_bucket_name}/bronze/wikimedia/recentchange"
-  silver_base_path  = "s3://${var.datalake_bucket_name}/silver/wikimedia/recentchange"
-  script_local_path = "${path.module}/scripts/bronze_to_silver.py"
+  bronze_base_path = "s3://${var.datalake_bucket_name}/bronze/wikimedia/recentchange"
+  silver_base_path = "s3://${var.datalake_bucket_name}/silver/wikimedia/recentchange"
+  gold_base_path   = "s3://${var.datalake_bucket_name}/gold"
 
-  script_s3_key    = "glue/scripts/bronze_to_silver.py"
+  bronze_to_silver_script_local_path = "${path.module}/scripts/bronze_to_silver.py"
+  silver_to_gold_script_local_path   = "${path.module}/scripts/silver_to_gold.py"
+
+  bronze_to_silver_script_s3_key = "glue/scripts/bronze_to_silver.py"
+  silver_to_gold_script_s3_key   = "glue/scripts/silver_to_gold.py"
+
   temp_dir         = "s3://${var.datalake_bucket_name}/glue/temp/"
   spark_event_logs = "s3://${var.datalake_bucket_name}/glue/spark-event-logs/"
 }
 
+
+
+# silver script
+
 resource "aws_s3_object" "bronze_to_silver_script" {
   bucket = var.datalake_bucket_name
-  key    = local.script_s3_key
+  key    = local.bronze_to_silver_script_s3_key
 
-  source                 = local.script_local_path
-  source_hash            = filemd5(local.script_local_path)
+  source                 = local.bronze_to_silver_script_local_path
+  source_hash            = filemd5(local.bronze_to_silver_script_local_path)
   server_side_encryption = "aws:kms"
   kms_key_id             = var.s3_kms_key_arn
 
   tags = var.tags
 }
 
+
+#gold script 
+
+resource "aws_s3_object" "silver_to_gold_script" {
+  bucket = var.datalake_bucket_name
+  key    = local.silver_to_gold_script_s3_key
+
+  source      = local.silver_to_gold_script_local_path
+  source_hash = filemd5(local.silver_to_gold_script_local_path)
+
+  server_side_encryption = "aws:kms"
+  kms_key_id             = var.s3_kms_key_arn
+
+  tags = var.tags
+}
+
+
+
+
+# silver scheduler
 
 resource "aws_glue_trigger" "bronze_to_silver_hourly" {
   count = var.enable_bronze_to_silver_schedule ? 1 : 0
@@ -38,7 +67,24 @@ resource "aws_glue_trigger" "bronze_to_silver_hourly" {
   tags = var.tags
 }
 
+# gold scheduler 
 
+resource "aws_glue_trigger" "silver_to_gold_hourly" {
+  count = var.enable_silver_to_gold_schedule ? 1 : 0
+
+  name = "${var.name_prefix}-silver-to-gold-hourly"
+
+  type     = "SCHEDULED"
+  schedule = "cron(25 * * * ? *)"
+
+  actions {
+    job_name = aws_glue_job.silver_to_gold.name
+  }
+
+  start_on_creation = true
+
+  tags = var.tags
+}
 
 data "aws_iam_policy_document" "glue_assume_role" {
   statement {
@@ -180,6 +226,47 @@ resource "aws_glue_job" "bronze_to_silver" {
     "--BRONZE_BASE_PATH" = local.bronze_base_path
     "--SILVER_BASE_PATH" = local.silver_base_path
     "--WRITE_MODE"       = "append"
+  }
+
+  tags = var.tags
+}
+
+
+
+
+# gold job 
+
+resource "aws_glue_job" "silver_to_gold" {
+  name     = "${var.name_prefix}-silver-to-gold"
+  role_arn = aws_iam_role.glue_etl.arn
+
+  glue_version      = var.glue_version
+  worker_type       = var.silver_to_gold_worker_type
+  number_of_workers = var.silver_to_gold_number_of_workers
+  timeout           = var.timeout_minutes
+  max_retries       = 0
+
+  execution_property {
+    max_concurrent_runs = 1
+  }
+
+  command {
+    name            = "glueetl"
+    script_location = "s3://${var.datalake_bucket_name}/${aws_s3_object.silver_to_gold_script.key}"
+    python_version  = "3"
+  }
+
+  default_arguments = {
+    "--job-language"                     = "python"
+    "--enable-metrics"                   = "true"
+    "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-spark-ui"                  = "true"
+    "--spark-event-logs-path"            = local.spark_event_logs
+    "--TempDir"                          = local.temp_dir
+
+    "--SILVER_BASE_PATH" = local.silver_base_path
+    "--GOLD_BASE_PATH"   = local.gold_base_path
+    "--TOP_PAGES_LIMIT"  = tostring(var.top_pages_limit)
   }
 
   tags = var.tags

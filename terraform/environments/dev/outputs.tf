@@ -328,3 +328,12 @@ output "glue_etl_bronze_base_path" {
 output "glue_etl_silver_base_path" {
   value = module.glue_etl.silver_base_path
 }
+
+
+output "glue_gold_table_names" {
+  value = module.glue_catalog.gold_table_names
+}
+
+output "glue_gold_s3_location" {
+  value = module.glue_catalog.gold_s3_location
+}

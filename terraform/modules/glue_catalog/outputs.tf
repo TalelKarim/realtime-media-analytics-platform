@@ -18,3 +18,15 @@ output "silver_table_name" {
 output "silver_s3_location" {
   value = local.silver_s3_location
 }
+
+
+output "gold_table_names" {
+  value = {
+    for key, table in aws_glue_catalog_table.gold :
+    key => table.name
+  }
+}
+
+output "gold_s3_location" {
+  value = local.gold_s3_location
+}
