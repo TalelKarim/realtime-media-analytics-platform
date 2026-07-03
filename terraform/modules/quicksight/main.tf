@@ -256,8 +256,7 @@ resource "aws_quicksight_data_set" "gold" {
   import_mode = "DIRECT_QUERY"
 
   physical_table_map {
-    physical_table_map_id = each.key
-
+    physical_table_map_id = replace(each.key, "_", "-")
     relational_table {
       data_source_arn = aws_quicksight_data_source.athena.arn
       catalog         = "AwsDataCatalog"
