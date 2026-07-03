@@ -20,6 +20,26 @@ resource "aws_s3_object" "bronze_to_silver_script" {
   tags = var.tags
 }
 
+
+resource "aws_glue_trigger" "bronze_to_silver_hourly" {
+  count = var.enable_bronze_to_silver_schedule ? 1 : 0
+
+  name = "${var.name_prefix}-bronze-to-silver-hourly"
+
+  type     = "SCHEDULED"
+  schedule = "cron(10 * * * ? *)"
+
+  actions {
+    job_name = aws_glue_job.bronze_to_silver.name
+  }
+
+  start_on_creation = true
+
+  tags = var.tags
+}
+
+
+
 data "aws_iam_policy_document" "glue_assume_role" {
   statement {
     effect = "Allow"

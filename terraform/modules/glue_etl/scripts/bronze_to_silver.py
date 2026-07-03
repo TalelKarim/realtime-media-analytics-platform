@@ -3,6 +3,9 @@ from datetime import datetime, timedelta, timezone
 
 from awsglue.context import GlueContext
 from awsglue.job import Job
+import boto3
+from urllib.parse import urlparse
+
 from pyspark.context import SparkContext
 from pyspark.sql.functions import (
     col,
@@ -42,6 +45,48 @@ def get_arg(name: str, default: str | None = None) -> str | None:
         return default
 
     return sys.argv[index + 1]
+
+
+def delete_s3_prefix(s3_uri: str) -> None:
+    """
+    Delete all objects under an S3 prefix.
+
+    This makes the job idempotent:
+    rerunning the same hour replaces the previous Silver output.
+    """
+    parsed = urlparse(s3_uri)
+
+    if parsed.scheme != "s3":
+        raise ValueError(f"Invalid S3 URI: {s3_uri}")
+
+    bucket = parsed.netloc
+    prefix = parsed.path.lstrip("/")
+
+    if not prefix.endswith("/"):
+        prefix = f"{prefix}/"
+
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+
+    total_deleted = 0
+
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        objects = page.get("Contents", [])
+
+        if not objects:
+            continue
+
+        response = s3.delete_objects(
+            Bucket=bucket,
+            Delete={
+                "Objects": [{"Key": obj["Key"]} for obj in objects]
+            },
+        )
+
+        total_deleted += len(response.get("Deleted", []))
+
+    print(f"Deleted {total_deleted} existing objects under {s3_uri}")
+
 
 
 def require_arg(name: str) -> str:
@@ -260,13 +305,29 @@ silver_df = (
 silver_count = silver_df.count()
 print(f"Silver output records: {silver_count}")
 
+
+silver_output_path = (
+    f"{silver_base_path}/"
+    f"year={process_year}/"
+    f"month={process_month}/"
+    f"day={process_day}/"
+    f"hour={process_hour}/"
+)
+
+print(f"Silver partition output path: {silver_output_path}")
+
+delete_s3_prefix(silver_output_path)
+
+
+
 (
     silver_df.write
-    .mode(write_mode)
+    .mode("append")
     .option("compression", "snappy")
-    .partitionBy("ingestion_date")
-    .parquet(silver_base_path)
+    .parquet(silver_output_path)
 )
+
+
 
 print("bronze_to_silver job completed successfully")
 

@@ -133,7 +133,6 @@ resource "aws_glue_catalog_table" "bronze_recentchange" {
   }
 }
 
-
 resource "aws_glue_catalog_table" "silver_recentchange" {
   name          = "wikimedia_silver_recentchange"
   database_name = aws_glue_catalog_database.this.name
@@ -149,13 +148,23 @@ resource "aws_glue_catalog_table" "silver_recentchange" {
 
     "projection.enabled" = "true"
 
-    "projection.ingestion_date.type"     = "date"
-    "projection.ingestion_date.range"    = "2026-01-01,NOW"
-    "projection.ingestion_date.format"   = "yyyy-MM-dd"
-    "projection.ingestion_date.interval" = "1"
-    "projection.ingestion_date.interval.unit" = "DAYS"
+    "projection.year.type"   = "integer"
+    "projection.year.range"  = "2026,2030"
+    "projection.year.digits" = "4"
 
-    "storage.location.template" = "s3://${var.datalake_bucket_name}/silver/wikimedia/recentchange/ingestion_date=$${ingestion_date}/"
+    "projection.month.type"   = "integer"
+    "projection.month.range"  = "1,12"
+    "projection.month.digits" = "2"
+
+    "projection.day.type"   = "integer"
+    "projection.day.range"  = "1,31"
+    "projection.day.digits" = "2"
+
+    "projection.hour.type"   = "integer"
+    "projection.hour.range"  = "0,23"
+    "projection.hour.digits" = "2"
+
+    "storage.location.template" = "s3://${var.datalake_bucket_name}/silver/wikimedia/recentchange/year=$${year}/month=$${month}/day=$${day}/hour=$${hour}/"
   }
 
   storage_descriptor {
@@ -177,6 +186,11 @@ resource "aws_glue_catalog_table" "silver_recentchange" {
     columns {
       name = "occurred_at"
       type = "timestamp"
+    }
+
+    columns {
+      name = "ingestion_date"
+      type = "date"
     }
 
     columns {
@@ -286,7 +300,22 @@ resource "aws_glue_catalog_table" "silver_recentchange" {
   }
 
   partition_keys {
-    name = "ingestion_date"
-    type = "date"
+    name = "year"
+    type = "int"
+  }
+
+  partition_keys {
+    name = "month"
+    type = "int"
+  }
+
+  partition_keys {
+    name = "day"
+    type = "int"
+  }
+
+  partition_keys {
+    name = "hour"
+    type = "int"
   }
 }

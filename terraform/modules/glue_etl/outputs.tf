@@ -13,3 +13,8 @@ output "bronze_base_path" {
 output "silver_base_path" {
   value = local.silver_base_path
 }
+
+
+output "bronze_to_silver_trigger_name" {
+  value = try(aws_glue_trigger.bronze_to_silver_hourly[0].name, null)
+}

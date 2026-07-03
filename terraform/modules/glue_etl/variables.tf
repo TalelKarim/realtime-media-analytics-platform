@@ -48,3 +48,13 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+
+
+# scheduler 
+
+variable "enable_bronze_to_silver_schedule" {
+  description = "Enable hourly Bronze to Silver Glue trigger."
+  type        = bool
+  default     = false
+}

@@ -599,6 +599,9 @@ resource "aws_iam_role_policy" "glue" {
         Effect = "Allow"
         Action = [
           "s3:GetBucketLocation",
+          "s3:AbortMultipartUpload",
+          "s3:ListMultipartUploadParts",
+          "s3:DeleteObject",
           "s3:ListBucket",
           "s3:GetObject",
           "s3:PutObject"
