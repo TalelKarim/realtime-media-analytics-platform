@@ -1,7 +1,7 @@
 data "aws_caller_identity" "current" {}
 
 module "quicksight" {
-  source = "./modules/quicksight"
+  source = "../../modules/quicksight"
 
   name_prefix    = local.name_prefix
   aws_account_id = data.aws_caller_identity.current.account_id
