@@ -123,3 +123,10 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+
+
+variable "quicksight_principal_arn" {
+  description = "QuickSight user or group ARN that owns/manages the QuickSight assets."
+  type        = string
+}

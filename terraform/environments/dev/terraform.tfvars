@@ -32,3 +32,9 @@ collector_sample_rate            = 0.01
 collector_batch_size             = 100
 collector_flush_interval_seconds = 3
 collector_log_level              = "INFO"
+
+
+
+
+# quicksight
+quicksight_principal_arn = "arn:aws:quicksight:us-east-1:156358246560:user/default/156358246560"

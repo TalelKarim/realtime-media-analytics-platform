@@ -337,3 +337,26 @@ output "glue_gold_table_names" {
 output "glue_gold_s3_location" {
   value = module.glue_catalog.gold_s3_location
 }
+
+
+# quicksight
+
+output "quicksight_athena_workgroup_name" {
+  value = module.quicksight.athena_workgroup_name
+}
+
+output "quicksight_athena_results_location" {
+  value = module.quicksight.athena_results_location
+}
+
+output "quicksight_data_source_arn" {
+  value = module.quicksight.quicksight_data_source_arn
+}
+
+output "quicksight_gold_dataset_arns" {
+  value = module.quicksight.quicksight_gold_dataset_arns
+}
+
+output "quicksight_gold_dataset_ids" {
+  value = module.quicksight.quicksight_gold_dataset_ids
+}
