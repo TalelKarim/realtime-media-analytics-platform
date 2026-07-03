@@ -166,6 +166,7 @@ data "aws_iam_policy_document" "glue_etl_data_access" {
     ]
 
     resources = [
+      "${var.datalake_bucket_arn}/gold/*",
       "${var.datalake_bucket_arn}/silver/*",
       "${var.datalake_bucket_arn}/glue/temp/*",
       "${var.datalake_bucket_arn}/glue/spark-event-logs/*"
