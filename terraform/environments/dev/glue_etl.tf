@@ -7,7 +7,7 @@ module "glue_etl" {
   s3_kms_key_arn       = module.kms.s3_key_arn
 
   enable_bronze_to_silver_schedule = true
-  enable_silver_to_gold_schedule   = false
+  enable_silver_to_gold_schedule   = true
 
   tags = local.tags
 }
