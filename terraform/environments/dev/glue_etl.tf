@@ -6,5 +6,7 @@ module "glue_etl" {
   datalake_bucket_arn  = module.s3_datalake.bucket_arn
   s3_kms_key_arn       = module.kms.s3_key_arn
 
+  enable_bronze_to_silver_schedule = true
+
   tags = local.tags
 }
