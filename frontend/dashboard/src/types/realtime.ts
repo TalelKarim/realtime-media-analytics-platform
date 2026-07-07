@@ -10,10 +10,10 @@ export interface ChartPoint {
 export interface TopPage {
   wiki: string;
   title: string;
-  namespace?: number | null;
+  namespace: number | null;
   count: number;
-  botCount?: number;
-  humanCount?: number;
+  botCount: number;
+  humanCount: number;
 }
 
 export interface StatsSnapshot {

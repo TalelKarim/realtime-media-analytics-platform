@@ -36,9 +36,9 @@ export const ConnectionStatus = ({
   const Icon = meta.icon;
 
   return (
-    <section className="rounded-3xl border border-slate-800 bg-slate-950/80 p-5 shadow-glow backdrop-blur">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div className="space-y-3">
+    <section className="rounded-3xl border border-slate-800/90 bg-slate-950/85 p-5 shadow-glow backdrop-blur">
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0 space-y-3">
           <div className="flex flex-wrap items-center gap-3">
             <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold ring-1 ${meta.className}`}>
               <Icon className={status === 'connecting' || status === 'reconnecting' ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
@@ -51,7 +51,7 @@ export const ConnectionStatus = ({
             )}
           </div>
           <p className="max-w-4xl break-all font-mono text-xs text-slate-400">{url || 'No WebSocket URL configured'}</p>
-          {error && <p className="text-sm text-rose-300">{error}</p>}
+          {error && <p className="max-w-4xl text-sm text-rose-300">{error}</p>}
         </div>
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">

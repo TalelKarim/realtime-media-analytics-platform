@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BarChart3, Bot, BrainCircuit, Globe2, Users, RadioTower, Settings2 } from 'lucide-react';
+import { BarChart3, Bot, BrainCircuit, Globe2, RadioTower, Settings2, Users } from 'lucide-react';
 import { ConnectionStatus } from './components/ConnectionStatus';
 import { SettingsPanel } from './components/SettingsPanel';
 import { TopicSelector } from './components/TopicSelector';
@@ -12,9 +12,9 @@ import { ChangeTypeChart } from './components/charts/ChangeTypeChart';
 import { BotHumanDonut } from './components/charts/BotHumanDonut';
 import { NamespaceChart } from './components/charts/NamespaceChart';
 import { TopPagesTable } from './components/charts/TopPagesTable';
-import { DEFAULT_SETTINGS, ENABLE_DEMO_DATA, LOCAL_STORAGE_KEYS } from './config';
+import { DEFAULT_SETTINGS, ENABLE_DEMO_DATA, LOCAL_STORAGE_KEYS, sanitizeWebSocketUrl } from './config';
 import { demoStats } from './lib/demoData';
-import { formatNumber, formatTime } from './lib/format';
+import { formatNumber, formatTime, topicLabel } from './lib/format';
 import { normalizeRealtimeMessage } from './lib/normalize';
 import { useRealtimeWebSocket } from './hooks/useRealtimeWebSocket';
 import type { DashboardSettings, EventLogEntry, RawRealtimeMessage, StatsSnapshot } from './types/realtime';
@@ -26,19 +26,38 @@ const createLogId = (): string => {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 };
 
+const sanitizeTopics = (topics: string[] | undefined): string[] => {
+  const safeTopics = (topics ?? []).map((topic) => topic.trim()).filter(Boolean);
+  return safeTopics.length > 0 ? Array.from(new Set(safeTopics)) : ['global'];
+};
+
 const loadSettings = (): DashboardSettings => {
   try {
     const stored = window.localStorage.getItem(LOCAL_STORAGE_KEYS.settings);
     if (!stored) return DEFAULT_SETTINGS;
+
     const parsed = JSON.parse(stored) as Partial<DashboardSettings>;
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
-      defaultTopics: parsed.defaultTopics?.length ? parsed.defaultTopics : DEFAULT_SETTINGS.defaultTopics,
+      wsUrl: sanitizeWebSocketUrl(parsed.wsUrl ?? DEFAULT_SETTINGS.wsUrl),
+      defaultTopics: sanitizeTopics(parsed.defaultTopics ?? DEFAULT_SETTINGS.defaultTopics),
+      heartbeatAction: parsed.heartbeatAction?.trim() || DEFAULT_SETTINGS.heartbeatAction,
+      heartbeatIntervalMs: Number.isFinite(parsed.heartbeatIntervalMs) && Number(parsed.heartbeatIntervalMs) > 0
+        ? Number(parsed.heartbeatIntervalMs)
+        : DEFAULT_SETTINGS.heartbeatIntervalMs,
     };
   } catch {
     return DEFAULT_SETTINGS;
   }
+};
+
+const createInitialStats = (): Record<string, StatsSnapshot> => {
+  const initialState: Record<string, StatsSnapshot> = {};
+  if (ENABLE_DEMO_DATA) {
+    initialState.global = demoStats;
+  }
+  return initialState;
 };
 
 const App = () => {
@@ -46,7 +65,7 @@ const App = () => {
   const [enabled, setEnabled] = useState(true);
   const [showSettings, setShowSettings] = useState(!settings.wsUrl);
   const [selectedTopic, setSelectedTopic] = useState(settings.defaultTopics[0] ?? 'global');
-  const [statsByTopic, setStatsByTopic] = useState<Record<string, StatsSnapshot>>(() => ENABLE_DEMO_DATA ? { global: demoStats } : {});
+  const [statsByTopic, setStatsByTopic] = useState<Record<string, StatsSnapshot>>(() => createInitialStats());
   const [logs, setLogs] = useState<EventLogEntry[]>([]);
 
   useEffect(() => {
@@ -54,41 +73,41 @@ const App = () => {
   }, [settings]);
 
   const addLog = useCallback((entry: Omit<EventLogEntry, 'id' | 'timestamp'>) => {
-    setLogs((previous) => [
+    setLogs((previousLogs) => [
       {
         id: createLogId(),
         timestamp: new Date().toISOString(),
         ...entry,
       },
-      ...previous,
-    ].slice(0, 40));
+      ...previousLogs,
+    ].slice(0, 50));
   }, []);
 
   const handleJsonMessage = useCallback((message: RawRealtimeMessage) => {
     const normalized = normalizeRealtimeMessage(message);
+    const rawType = String(message.type ?? message.action ?? 'message');
 
-    if (message.error || String(message.type ?? '').toLowerCase().includes('error')) {
+    if (message.error || rawType.toLowerCase().includes('error')) {
       addLog({
         level: 'error',
         message: message.error ? String(message.error) : 'Backend returned an error message',
-        details: JSON.stringify(message).slice(0, 240),
+        details: JSON.stringify(message).slice(0, 280),
       });
     }
 
     if (!normalized) {
-      const type = String(message.type ?? message.action ?? 'message');
-      if (!['pong', 'ack', 'subscribed', 'unsubscribed'].includes(type.toLowerCase())) {
-        addLog({ level: 'info', message: `Received ${type}`, details: JSON.stringify(message).slice(0, 240) });
+      if (!['pong', 'ack', 'subscribed', 'unsubscribed', 'heartbeat.ack'].includes(rawType.toLowerCase())) {
+        addLog({ level: 'info', message: `Received ${rawType}`, details: JSON.stringify(message).slice(0, 280) });
       }
       return;
     }
 
-    setStatsByTopic((previous) => ({ ...previous, [normalized.topic]: normalized }));
-    setSelectedTopic((previous) => previous || normalized.topic);
+    setStatsByTopic((previousStats) => ({ ...previousStats, [normalized.topic]: normalized }));
+    setSelectedTopic((previousTopic) => previousTopic || normalized.topic);
     addLog({
       level: 'success',
       message: `stats.update received for ${normalized.topic}`,
-      details: `${formatNumber(normalized.eventCount)} event(s)`,
+      details: `${formatNumber(normalized.eventCount)} event(s) in latest live window`,
     });
   }, [addLog]);
 
@@ -116,12 +135,14 @@ const App = () => {
 
   const botPercent = currentStats && currentStats.eventCount > 0 ? (currentStats.botCount / currentStats.eventCount) * 100 : 0;
   const humanPercent = currentStats && currentStats.eventCount > 0 ? (currentStats.humanCount / currentStats.eventCount) * 100 : 0;
+  const isWikiTopic = selectedTopic.startsWith('wiki:');
+  const activeTopicLabel = topicLabel(selectedTopic || 'global');
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
-        <div className="absolute left-1/2 top-0 h-[36rem] w-[36rem] -translate-x-1/2 rounded-full bg-sky-500/10 blur-3xl" />
-        <div className="absolute bottom-0 right-0 h-[30rem] w-[30rem] rounded-full bg-emerald-500/10 blur-3xl" />
+        <div className="absolute left-1/2 top-0 h-[38rem] w-[38rem] -translate-x-1/2 rounded-full bg-sky-500/10 blur-3xl" />
+        <div className="absolute bottom-0 right-0 h-[34rem] w-[34rem] rounded-full bg-emerald-500/10 blur-3xl" />
       </div>
 
       <div className="relative mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -132,9 +153,14 @@ const App = () => {
               Live WebSocket dashboard
             </div>
             <h1 className="mt-4 text-4xl font-black tracking-tight text-white sm:text-5xl">Realtime Media Analytics</h1>
-            <p className="mt-3 max-w-3xl text-base text-slate-400">
+            <p className="mt-3 max-w-3xl text-base leading-7 text-slate-400">
               Live Wikimedia activity powered by API Gateway WebSocket, Lambda, DynamoDB aggregates and the broadcaster pipeline.
             </p>
+            <div className="mt-4 flex flex-wrap gap-2 text-xs text-slate-400">
+              <span className="rounded-full bg-slate-900 px-3 py-1 ring-1 ring-slate-800">Current live window</span>
+              <span className="rounded-full bg-slate-900 px-3 py-1 ring-1 ring-slate-800">Auto reconnect</span>
+              <span className="rounded-full bg-slate-900 px-3 py-1 ring-1 ring-slate-800">Heartbeat TTL refresh</span>
+            </div>
           </div>
           <button
             type="button"
@@ -151,10 +177,10 @@ const App = () => {
             <SettingsPanel
               settings={settings}
               enabled={enabled}
-              onSettingsChange={(next) => {
-                setSettings(next);
-                if (next.defaultTopics.length > 0 && !next.defaultTopics.includes(selectedTopic)) {
-                  setSelectedTopic(next.defaultTopics[0]);
+              onSettingsChange={(nextSettings) => {
+                setSettings(nextSettings);
+                if (nextSettings.defaultTopics.length > 0 && !nextSettings.defaultTopics.includes(selectedTopic)) {
+                  setSelectedTopic(nextSettings.defaultTopics[0]);
                 }
               }}
               onEnabledChange={setEnabled}
@@ -180,17 +206,21 @@ const App = () => {
             onUnsubscribe={(topic) => {
               ws.unsubscribe(topic);
               if (selectedTopic === topic) {
-                const remaining = topics.filter((candidate) => candidate !== topic);
-                setSelectedTopic(remaining[0] ?? 'global');
+                const remainingTopics = topics.filter((candidateTopic) => candidateTopic !== topic);
+                setSelectedTopic(remainingTopics[0] ?? 'global');
               }
             }}
           />
 
+          <section className="rounded-3xl border border-slate-800/90 bg-slate-950/70 px-5 py-4 text-sm text-slate-400 ring-1 ring-white/5">
+            <span className="font-semibold text-slate-200">Selected view:</span> {activeTopicLabel}. Metrics represent the latest live aggregation window, so counters can reset when the backend opens a new window.
+          </section>
+
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <MetricCard label="Current events" value={currentStats?.eventCount ?? 0} icon={BarChart3} helper={`Topic ${selectedTopic || '—'}`} />
-            <MetricCard label="Bot events" value={currentStats?.botCount ?? 0} icon={Bot} helper="Automated activity" percent={botPercent} />
-            <MetricCard label="Human events" value={currentStats?.humanCount ?? 0} icon={Users} helper="User activity" percent={humanPercent} />
-            <MetricCard label="Top wikis" value={currentStats?.topWikis.length ?? 0} icon={Globe2} helper={`Updated ${formatTime(currentStats?.receivedAt)}`} />
+            <MetricCard label="Events in current window" value={currentStats?.eventCount ?? 0} icon={BarChart3} helper={`Topic ${selectedTopic || '—'}`} tone="sky" />
+            <MetricCard label="Bot events" value={currentStats?.botCount ?? 0} icon={Bot} helper="Automated activity" percent={botPercent} tone="violet" />
+            <MetricCard label="Human events" value={currentStats?.humanCount ?? 0} icon={Users} helper="User activity" percent={humanPercent} tone="emerald" />
+            <MetricCard label={isWikiTopic ? 'Topic mode' : 'Tracked wikis'} value={isWikiTopic ? 1 : currentStats?.topWikis.length ?? 0} icon={Globe2} helper={`Updated ${formatTime(currentStats?.receivedAt)}`} tone="amber" />
           </div>
 
           {!currentStats ? (
@@ -198,11 +228,23 @@ const App = () => {
           ) : (
             <>
               <div className="grid gap-6 xl:grid-cols-2">
-                <ChartCard title="Top wikis" description="Highest activity by Wikimedia project for the selected live topic.">
-                  <TopWikisChart data={currentStats.topWikis} />
+                <ChartCard
+                  title={isWikiTopic ? 'Selected wiki' : 'Top wikis'}
+                  description={isWikiTopic ? 'This view is already filtered to one wiki. Per-wiki breakdowns below depend on the backend payload.' : 'Highest activity by Wikimedia project for the selected live topic.'}
+                  badge={selectedTopic}
+                >
+                  {isWikiTopic ? (
+                    <div className="flex h-72 items-center justify-center rounded-2xl bg-slate-900/40 p-6 text-center text-sm leading-6 text-slate-400 ring-1 ring-slate-800">
+                      <p>
+                        You are viewing <span className="font-mono text-slate-200">{selectedTopic}</span>. Top wikis are only meaningful in the global topic; this card is intentionally contextual.
+                      </p>
+                    </div>
+                  ) : (
+                    <TopWikisChart data={currentStats.topWikis} />
+                  )}
                 </ChartCard>
 
-                <ChartCard title="Bot vs human" description="Share of automated versus human edits/events.">
+                <ChartCard title="Bot vs human" description="Share of automated versus human edits/events in the selected live window.">
                   <BotHumanDonut botCount={currentStats.botCount} humanCount={currentStats.humanCount} />
                 </ChartCard>
               </div>
@@ -212,40 +254,31 @@ const App = () => {
                   <ChangeTypeChart data={currentStats.changeTypes} />
                 </ChartCard>
 
-                <ChartCard title="Namespace activity" description="Activity by MediaWiki namespace.">
+                <ChartCard title="Namespace activity" description="Activity by MediaWiki namespace in the selected live window.">
                   <NamespaceChart data={currentStats.namespaces} />
                 </ChartCard>
               </div>
 
               <ChartCard title="Top pages" description="Most active pages in the latest live update." className="xl:col-span-2">
-                <TopPagesTable pages={currentStats.topPages} />
+                <TopPagesTable data={currentStats.topPages} />
               </ChartCard>
             </>
           )}
 
-          <div className="grid gap-6 xl:grid-cols-[1fr_380px]">
-            <section className="rounded-3xl border border-slate-800 bg-slate-950/80 p-5 backdrop-blur">
-              <div className="mb-4 flex items-center gap-3">
-                <div className="rounded-2xl bg-sky-500/10 p-3 text-sky-300 ring-1 ring-sky-500/20">
-                  <BrainCircuit className="h-5 w-5" />
-                </div>
-                <div>
-                  <h2 className="text-lg font-semibold text-white">Architecture note</h2>
-                  <p className="text-sm text-slate-400">The frontend never writes to DynamoDB directly.</p>
-                </div>
-              </div>
-              <div className="grid gap-3 text-sm text-slate-400 md:grid-cols-3">
+          <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
+            <section className="rounded-3xl border border-slate-800/90 bg-slate-950/85 p-5 backdrop-blur">
+              <h2 className="text-lg font-semibold text-white">Backend contract health</h2>
+              <p className="mt-1 text-sm leading-6 text-slate-400">
+                The frontend accepts tolerant field names, but the best production contract is a consistent <span className="font-mono text-slate-200">stats.update</span> message with event counts, bot/human, change types, namespaces and top pages for each topic.
+              </p>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <div className="rounded-2xl bg-slate-900/70 p-4 ring-1 ring-slate-800">
-                  <p className="font-semibold text-slate-200">1. Subscribe</p>
-                  <p className="mt-2">The browser sends subscribe/unsubscribe actions over WSS.</p>
+                  <p className="text-xs uppercase tracking-wide text-slate-500">Current topic</p>
+                  <p className="mt-1 break-all font-mono text-sm text-slate-200">{selectedTopic}</p>
                 </div>
                 <div className="rounded-2xl bg-slate-900/70 p-4 ring-1 ring-slate-800">
-                  <p className="font-semibold text-slate-200">2. Heartbeat</p>
-                  <p className="mt-2">A periodic heartbeat lets the backend refresh the connection TTL.</p>
-                </div>
-                <div className="rounded-2xl bg-slate-900/70 p-4 ring-1 ring-slate-800">
-                  <p className="font-semibold text-slate-200">3. Broadcast</p>
-                  <p className="mt-2">Broadcaster Lambda pushes stats.update messages with the latest aggregates.</p>
+                  <p className="text-xs uppercase tracking-wide text-slate-500">Last payload</p>
+                  <p className="mt-1 text-sm text-slate-200">{currentStats ? `${formatNumber(currentStats.eventCount)} events at ${formatTime(currentStats.receivedAt)}` : 'No payload yet'}</p>
                 </div>
               </div>
             </section>

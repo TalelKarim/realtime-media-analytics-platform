@@ -5,7 +5,7 @@ export const formatNumber = (value: number | null | undefined): string => {
 
 export const formatPercent = (value: number | null | undefined): string => {
   const safeValue = typeof value === 'number' && Number.isFinite(value) ? value : 0;
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 }).format(safeValue) + '%';
+  return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 }).format(safeValue)}%`;
 };
 
 export const formatTime = (iso?: string): string => {
@@ -15,4 +15,11 @@ export const formatTime = (iso?: string): string => {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 };
 
-export const shortTopic = (topic: string): string => topic.length > 18 ? `${topic.slice(0, 16)}…` : topic;
+export const shortTopic = (topic: string): string => (topic.length > 22 ? `${topic.slice(0, 20)}…` : topic);
+
+export const topicLabel = (topic: string): string => {
+  if (topic === 'global') return 'Global live window';
+  if (topic === 'top_pages') return 'Top pages live window';
+  if (topic.startsWith('wiki:')) return `${topic.replace('wiki:', '')} live window`;
+  return `${topic} live window`;
+};

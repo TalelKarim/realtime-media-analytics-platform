@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { parseJsonMessage } from '../lib/normalize';
 import type { ConnectionStatus, EventLogEntry, RawRealtimeMessage } from '../types/realtime';
 
@@ -9,7 +9,7 @@ interface UseRealtimeWebSocketOptions {
   heartbeatAction: string;
   heartbeatIntervalMs: number;
   onJsonMessage: (message: RawRealtimeMessage) => void;
-  onLog?: (entry: Omit<EventLogEntry, 'id' | 'timestamp'>) => void;
+  onLog: (entry: Omit<EventLogEntry, 'id' | 'timestamp'>) => void;
   maxReconnectDelayMs?: number;
 }
 
@@ -20,25 +20,19 @@ interface UseRealtimeWebSocketResult {
   lastMessageAt?: string;
   reconnectAttempt: number;
   error?: string;
-  connect: () => void;
-  disconnect: () => void;
-  reconnect: () => void;
+  sendJson: (message: Record<string, unknown>) => boolean;
   subscribe: (topic: string) => void;
   unsubscribe: (topic: string) => void;
-  sendJson: (payload: Record<string, unknown>) => boolean;
+  reconnect: () => void;
+  disconnect: () => void;
 }
 
-const RECONNECT_BASE_DELAY_MS = 700;
-const DEFAULT_MAX_RECONNECT_DELAY_MS = 20_000;
+const uniqueTopics = (topics: string[]): string[] => Array.from(new Set(topics.map((topic) => topic.trim()).filter(Boolean)));
 
-const buildBackoffDelay = (attempt: number, maxDelayMs: number): number => {
-  const exponential = Math.min(maxDelayMs, RECONNECT_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1));
-  const jitter = Math.round(Math.random() * 450);
-  return exponential + jitter;
-};
-
-const uniqueTopics = (topics: string[]): string[] => {
-  return Array.from(new Set(topics.map((topic) => topic.trim()).filter(Boolean)));
+const calculateBackoff = (attempt: number, maxDelayMs: number): number => {
+  const baseDelayMs = Math.min(1000 * 2 ** Math.max(0, attempt - 1), maxDelayMs);
+  const jitterMs = Math.floor(Math.random() * 500);
+  return baseDelayMs + jitterMs;
 };
 
 export const useRealtimeWebSocket = ({
@@ -49,105 +43,92 @@ export const useRealtimeWebSocket = ({
   heartbeatIntervalMs,
   onJsonMessage,
   onLog,
-  maxReconnectDelayMs = DEFAULT_MAX_RECONNECT_DELAY_MS,
+  maxReconnectDelayMs = 30_000,
 }: UseRealtimeWebSocketOptions): UseRealtimeWebSocketResult => {
   const [status, setStatus] = useState<ConnectionStatus>('idle');
   const [activeTopics, setActiveTopics] = useState<string[]>(() => uniqueTopics(defaultTopics));
-  const [lastConnectedAt, setLastConnectedAt] = useState<string | undefined>();
-  const [lastMessageAt, setLastMessageAt] = useState<string | undefined>();
+  const [lastConnectedAt, setLastConnectedAt] = useState<string>();
+  const [lastMessageAt, setLastMessageAt] = useState<string>();
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
-  const [error, setError] = useState<string | undefined>();
+  const [error, setError] = useState<string>();
 
   const socketRef = useRef<WebSocket | null>(null);
-  const heartbeatTimerRef = useRef<number | undefined>();
-  const reconnectTimerRef = useRef<number | undefined>();
-  const shouldReconnectRef = useRef(false);
+  const heartbeatTimerRef = useRef<number | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
   const manuallyClosedRef = useRef(false);
+  const shouldReconnectRef = useRef(true);
+  const activeTopicsRef = useRef<string[]>(uniqueTopics(defaultTopics));
+  const connectRef = useRef<() => void>(() => undefined);
   const onJsonMessageRef = useRef(onJsonMessage);
   const onLogRef = useRef(onLog);
-  const topicsRef = useRef<Set<string>>(new Set(uniqueTopics(defaultTopics)));
-  const connectRef = useRef<() => void>(() => undefined);
 
-  onJsonMessageRef.current = onJsonMessage;
-  onLogRef.current = onLog;
+  useEffect(() => {
+    onJsonMessageRef.current = onJsonMessage;
+  }, [onJsonMessage]);
+
+  useEffect(() => {
+    onLogRef.current = onLog;
+  }, [onLog]);
+
+  useEffect(() => {
+    const nextTopics = uniqueTopics(defaultTopics);
+    activeTopicsRef.current = nextTopics;
+    setActiveTopics(nextTopics);
+  }, [defaultTopics]);
 
   const log = useCallback((entry: Omit<EventLogEntry, 'id' | 'timestamp'>) => {
-    onLogRef.current?.(entry);
+    onLogRef.current(entry);
+  }, []);
+
+  const clearHeartbeat = useCallback(() => {
+    if (heartbeatTimerRef.current !== null) {
+      window.clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = null;
+    }
+  }, []);
+
+  const clearReconnect = useCallback(() => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
   }, []);
 
   const clearTimers = useCallback(() => {
-    if (heartbeatTimerRef.current) {
-      window.clearInterval(heartbeatTimerRef.current);
-      heartbeatTimerRef.current = undefined;
-    }
-    if (reconnectTimerRef.current) {
-      window.clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = undefined;
-    }
-  }, []);
+    clearHeartbeat();
+    clearReconnect();
+  }, [clearHeartbeat, clearReconnect]);
 
-  const sendJson = useCallback((payload: Record<string, unknown>): boolean => {
+  const sendJson = useCallback((message: Record<string, unknown>): boolean => {
     const socket = socketRef.current;
-
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return false;
     }
 
-    socket.send(JSON.stringify(payload));
+    socket.send(JSON.stringify(message));
     return true;
   }, []);
 
   const resubscribeAll = useCallback(() => {
-    topicsRef.current.forEach((topic) => {
+    for (const topic of activeTopicsRef.current) {
       sendJson({ action: 'subscribe', topic });
-    });
-
-    if (topicsRef.current.size > 0) {
-      log({
-        level: 'info',
-        message: `Resubscribed to ${topicsRef.current.size} topic(s)`,
-        details: Array.from(topicsRef.current).join(', '),
-      });
     }
-  }, [log, sendJson]);
+  }, [sendJson]);
 
   const startHeartbeat = useCallback(() => {
-    if (!heartbeatAction || heartbeatIntervalMs <= 0) return;
+    clearHeartbeat();
 
-    if (heartbeatTimerRef.current) {
-      window.clearInterval(heartbeatTimerRef.current);
-    }
+    if (!heartbeatAction || heartbeatIntervalMs <= 0) return;
 
     heartbeatTimerRef.current = window.setInterval(() => {
       sendJson({
         action: heartbeatAction,
         client_type: 'dashboard',
         sent_at: new Date().toISOString(),
+        topics: activeTopicsRef.current,
       });
     }, heartbeatIntervalMs);
-  }, [heartbeatAction, heartbeatIntervalMs, sendJson]);
-
-  const scheduleReconnect = useCallback(() => {
-    if (!shouldReconnectRef.current || manuallyClosedRef.current || !enabled || !url) return;
-
-    setReconnectAttempt((previous) => {
-      const nextAttempt = previous + 1;
-      const delayMs = buildBackoffDelay(nextAttempt, maxReconnectDelayMs);
-
-      setStatus('reconnecting');
-      log({
-        level: 'warning',
-        message: `WebSocket reconnect scheduled in ${Math.round(delayMs / 1000)}s`,
-        details: `Attempt ${nextAttempt}`,
-      });
-
-      reconnectTimerRef.current = window.setTimeout(() => {
-        connectRef.current();
-      }, delayMs);
-
-      return nextAttempt;
-    });
-  }, [enabled, log, maxReconnectDelayMs, url]);
+  }, [clearHeartbeat, heartbeatAction, heartbeatIntervalMs, sendJson]);
 
   const closeSocket = useCallback(() => {
     const socket = socketRef.current;
@@ -165,9 +146,37 @@ export const useRealtimeWebSocket = ({
     socketRef.current = null;
   }, []);
 
+  const scheduleReconnect = useCallback(() => {
+    if (!enabled || !url || manuallyClosedRef.current || !shouldReconnectRef.current) return;
+
+    setReconnectAttempt((previousAttempt) => {
+      const nextAttempt = previousAttempt + 1;
+      const delayMs = calculateBackoff(nextAttempt, maxReconnectDelayMs);
+
+      setStatus('reconnecting');
+      log({
+        level: 'warning',
+        message: `WebSocket reconnect scheduled in ${Math.round(delayMs / 1000)}s`,
+        details: `Attempt ${nextAttempt}`,
+      });
+
+      reconnectTimerRef.current = window.setTimeout(() => {
+        connectRef.current();
+      }, delayMs);
+
+      return nextAttempt;
+    });
+  }, [enabled, log, maxReconnectDelayMs, url]);
+
   const connect = useCallback(() => {
     if (!enabled || !url) {
       setStatus('idle');
+      return;
+    }
+
+    if (!url.startsWith('wss://') && !url.startsWith('ws://')) {
+      setStatus('error');
+      setError('Invalid WebSocket URL. It must start with wss:// or ws://');
       return;
     }
 
@@ -176,10 +185,20 @@ export const useRealtimeWebSocket = ({
 
     manuallyClosedRef.current = false;
     shouldReconnectRef.current = true;
-    setStatus((previous) => (previous === 'reconnecting' ? 'reconnecting' : 'connecting'));
+    setStatus((previousStatus) => (previousStatus === 'reconnecting' ? 'reconnecting' : 'connecting'));
     setError(undefined);
 
-    const socket = new WebSocket(url);
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(url);
+    } catch (exception) {
+      const message = exception instanceof Error ? exception.message : 'Unable to construct WebSocket';
+      setStatus('error');
+      setError(message);
+      log({ level: 'error', message: 'Invalid WebSocket URL', details: message });
+      return;
+    }
+
     socketRef.current = socket;
 
     socket.onopen = () => {
@@ -206,15 +225,12 @@ export const useRealtimeWebSocket = ({
     };
 
     socket.onerror = () => {
-      setError('WebSocket error');
-      log({ level: 'error', message: 'WebSocket error', details: 'The browser did not expose a detailed error. Check API Gateway logs.' });
+      setError('WebSocket error. Check browser Network frames and API Gateway logs.');
+      log({ level: 'error', message: 'WebSocket error', details: 'The browser did not expose a detailed error.' });
     };
 
-    socket.onclose = (event) => {
-      if (heartbeatTimerRef.current) {
-        window.clearInterval(heartbeatTimerRef.current);
-        heartbeatTimerRef.current = undefined;
-      }
+    socket.onclose = (event: CloseEvent) => {
+      clearHeartbeat();
 
       const cleanClose = event.code === 1000 || event.code === 1001;
       log({
@@ -230,7 +246,7 @@ export const useRealtimeWebSocket = ({
 
       scheduleReconnect();
     };
-  }, [clearTimers, closeSocket, enabled, log, resubscribeAll, scheduleReconnect, startHeartbeat, url]);
+  }, [clearHeartbeat, clearTimers, closeSocket, enabled, log, resubscribeAll, scheduleReconnect, startHeartbeat, url]);
 
   connectRef.current = connect;
 
@@ -244,78 +260,66 @@ export const useRealtimeWebSocket = ({
   }, [clearTimers, closeSocket, log]);
 
   const reconnect = useCallback(() => {
-    log({ level: 'info', message: 'Manual reconnect requested' });
     manuallyClosedRef.current = false;
     shouldReconnectRef.current = true;
     setReconnectAttempt(0);
-    connect();
-  }, [connect, log]);
+    connectRef.current();
+  }, []);
 
   const subscribe = useCallback((topic: string) => {
     const cleanTopic = topic.trim();
     if (!cleanTopic) return;
 
-    topicsRef.current.add(cleanTopic);
-    setActiveTopics(Array.from(topicsRef.current));
-    const sent = sendJson({ action: 'subscribe', topic: cleanTopic });
-
-    log({
-      level: sent ? 'success' : 'info',
-      message: sent ? `Subscribed to ${cleanTopic}` : `Topic queued: ${cleanTopic}`,
+    setActiveTopics((previousTopics) => {
+      const nextTopics = uniqueTopics([...previousTopics, cleanTopic]);
+      activeTopicsRef.current = nextTopics;
+      return nextTopics;
     });
+
+    const sent = sendJson({ action: 'subscribe', topic: cleanTopic });
+    log({ level: sent ? 'success' : 'info', message: `Subscribed to ${cleanTopic}`, details: sent ? 'Subscribe sent over WSS' : 'Will subscribe after connection opens' });
   }, [log, sendJson]);
 
   const unsubscribe = useCallback((topic: string) => {
     const cleanTopic = topic.trim();
     if (!cleanTopic) return;
 
-    topicsRef.current.delete(cleanTopic);
-    setActiveTopics(Array.from(topicsRef.current));
-    const sent = sendJson({ action: 'unsubscribe', topic: cleanTopic });
-
-    log({
-      level: sent ? 'success' : 'info',
-      message: sent ? `Unsubscribed from ${cleanTopic}` : `Removed queued topic: ${cleanTopic}`,
+    setActiveTopics((previousTopics) => {
+      const nextTopics = previousTopics.filter((candidate) => candidate !== cleanTopic);
+      activeTopicsRef.current = nextTopics;
+      return nextTopics;
     });
+
+    const sent = sendJson({ action: 'unsubscribe', topic: cleanTopic });
+    log({ level: sent ? 'info' : 'warning', message: `Unsubscribed from ${cleanTopic}`, details: sent ? 'Unsubscribe sent over WSS' : 'Socket not open; local topic removed' });
   }, [log, sendJson]);
 
   useEffect(() => {
-    const cleanTopics = uniqueTopics(defaultTopics);
-    topicsRef.current = new Set(cleanTopics);
-    setActiveTopics(cleanTopics);
-  }, [defaultTopics.join('|')]);
-
-  useEffect(() => {
-    if (enabled && url) {
-      connect();
-    } else {
+    if (!enabled) {
       disconnect();
-      setStatus('idle');
+      return;
     }
+
+    connect();
 
     return () => {
       shouldReconnectRef.current = false;
-      manuallyClosedRef.current = true;
       clearTimers();
       closeSocket();
     };
-  }, [clearTimers, closeSocket, connect, disconnect, enabled, url]);
+  }, [clearTimers, closeSocket, connect, disconnect, enabled]);
 
-  return useMemo(
-    () => ({
-      status,
-      activeTopics,
-      lastConnectedAt,
-      lastMessageAt,
-      reconnectAttempt,
-      error,
-      connect,
-      disconnect,
-      reconnect,
-      subscribe,
-      unsubscribe,
-      sendJson,
-    }),
-    [activeTopics, connect, disconnect, error, lastConnectedAt, lastMessageAt, reconnect, reconnectAttempt, sendJson, status, subscribe, unsubscribe],
-  );
+  return {
+    status,
+    activeTopics,
+    lastConnectedAt,
+    lastMessageAt,
+    reconnectAttempt,
+    error,
+    sendJson,
+    subscribe,
+    unsubscribe,
+    reconnect,
+    disconnect,
+  };
 };

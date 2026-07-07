@@ -15,22 +15,24 @@ const toNumber = (value: unknown, fallback = 0): number => {
 
 const readAny = (record: Record<string, unknown>, keys: string[]): unknown => {
   for (const key of keys) {
-    if (record[key] !== undefined && record[key] !== null) return record[key];
+    const value = record[key];
+    if (value !== undefined && value !== null) return value;
   }
   return undefined;
 };
 
 const normalizeChartPoints = (value: unknown): ChartPoint[] => {
   if (Array.isArray(value)) {
-    return value
-      .map((item) => {
-        if (!isRecord(item)) return null;
-        const name = String(readAny(item, ['name', 'wiki', 'change_type', 'changeType', 'namespace', 'key', 'label', 'type']) ?? 'unknown');
-        const count = toNumber(readAny(item, ['count', 'event_count', 'eventCount', 'value', 'events']));
-        return { name, count } satisfies ChartPoint;
-      })
-      .filter((item): item is ChartPoint => Boolean(item))
-      .sort((a, b) => b.count - a.count);
+    const points: ChartPoint[] = [];
+
+    for (const item of value) {
+      if (!isRecord(item)) continue;
+      const name = String(readAny(item, ['name', 'wiki', 'change_type', 'changeType', 'namespace', 'key', 'label', 'type']) ?? 'unknown');
+      const count = toNumber(readAny(item, ['count', 'event_count', 'eventCount', 'value', 'events']));
+      points.push({ name, count });
+    }
+
+    return points.sort((a, b) => b.count - a.count);
   }
 
   if (isRecord(value)) {
@@ -45,21 +47,24 @@ const normalizeChartPoints = (value: unknown): ChartPoint[] => {
 const normalizeTopPages = (value: unknown): TopPage[] => {
   if (!Array.isArray(value)) return [];
 
-  return value
-    .map((item) => {
-      if (!isRecord(item)) return null;
+  const pages: TopPage[] = [];
 
-      return {
-        wiki: String(readAny(item, ['wiki']) ?? 'unknown'),
-        title: String(readAny(item, ['title', 'page', 'name']) ?? 'unknown'),
-        namespace: readAny(item, ['namespace']) === undefined ? null : toNumber(readAny(item, ['namespace'])),
-        count: toNumber(readAny(item, ['count', 'event_count', 'eventCount', 'value', 'events'])),
-        botCount: toNumber(readAny(item, ['bot_count', 'botCount', 'bot_event_count']), 0),
-        humanCount: toNumber(readAny(item, ['human_count', 'humanCount', 'human_event_count']), 0),
-      } satisfies TopPage;
-    })
-    .filter((item): item is TopPage => Boolean(item))
-    .sort((a, b) => b.count - a.count);
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+
+    const namespaceValue = readAny(item, ['namespace', 'ns']);
+
+    pages.push({
+      wiki: String(readAny(item, ['wiki']) ?? 'unknown'),
+      title: String(readAny(item, ['title', 'page', 'name']) ?? 'unknown'),
+      namespace: namespaceValue === undefined || namespaceValue === null ? null : toNumber(namespaceValue),
+      count: toNumber(readAny(item, ['count', 'event_count', 'eventCount', 'value', 'events'])),
+      botCount: toNumber(readAny(item, ['bot_count', 'botCount', 'bot_event_count']), 0),
+      humanCount: toNumber(readAny(item, ['human_count', 'humanCount', 'human_event_count']), 0),
+    });
+  }
+
+  return pages.sort((a, b) => b.count - a.count);
 };
 
 export const normalizeRealtimeMessage = (message: RawRealtimeMessage): StatsSnapshot | null => {
@@ -74,12 +79,18 @@ export const normalizeRealtimeMessage = (message: RawRealtimeMessage): StatsSnap
   if (!body) return null;
 
   const messageType = String(message.type ?? message.action ?? body.type ?? '').toLowerCase();
-  const looksLikeStats = messageType.includes('stats') || body.top_wikis !== undefined || body.topWikis !== undefined || body.event_count !== undefined || body.events_count !== undefined;
+  const looksLikeStats =
+    messageType.includes('stats') ||
+    body.top_wikis !== undefined ||
+    body.topWikis !== undefined ||
+    body.event_count !== undefined ||
+    body.eventCount !== undefined ||
+    body.events_count !== undefined ||
+    body.eventsCount !== undefined;
 
   if (!looksLikeStats) return null;
 
   const topic = String(message.topic ?? body.topic ?? 'global');
-
   const botCount = toNumber(readAny(body, ['bot_count', 'botCount', 'bot_event_count', 'botEvents']));
   const humanCount = toNumber(readAny(body, ['human_count', 'humanCount', 'human_event_count', 'humanEvents']));
   const eventCount = toNumber(
