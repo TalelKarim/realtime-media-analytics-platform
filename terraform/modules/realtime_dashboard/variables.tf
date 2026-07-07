@@ -20,3 +20,8 @@ variable "common_tags" {
   description = "Common tags applied to taggable resources."
   type        = map(string)
 }
+
+
+variable "github_openid_arn" {
+  default = "arn:aws:iam::156358246560:oidc-provider/token.actions.githubusercontent.com"
+}
