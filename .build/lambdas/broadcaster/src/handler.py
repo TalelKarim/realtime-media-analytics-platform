@@ -288,13 +288,12 @@ def read_top_wikis(window_key: str) -> List[Dict[str, Any]]:
     ]
 
 
-def read_top_pages(window_key: str) -> List[Dict[str, Any]]:
-    prefix = f"{window_key}#"
+def _read_top_pages_by_prefix(window_key_prefix: str) -> List[Dict[str, Any]]:
     pages: List[Dict[str, Any]] = []
 
     for shard_id in range(TOP_METRIC_SHARD_COUNT):
         metric_key = f"METRIC#TOP_PAGES#SHARD#{shard_id}"
-        items = query_metric_items(metric_key, prefix)
+        items = query_metric_items(metric_key, window_key_prefix)
 
         for item in items:
             pages.append(
@@ -303,6 +302,10 @@ def read_top_pages(window_key: str) -> List[Dict[str, Any]]:
                     "title": item.get("title"),
                     "count": get_event_count(item),
                     "url": item.get("title_url"),
+                    "title_url": item.get("title_url"),
+                    "namespace": item.get("namespace"),
+                    "last_change_type": item.get("last_change_type"),
+                    "last_seen_at": item.get("last_seen_at"),
                 }
             )
 
@@ -315,6 +318,60 @@ def read_top_pages(window_key: str) -> List[Dict[str, Any]]:
     pages.sort(key=lambda page: page["count"], reverse=True)
 
     return pages[:TOP_PAGES_LIMIT]
+
+
+def read_top_pages(window_key: str) -> List[Dict[str, Any]]:
+    # Global top pages for the whole live aggregation window.
+    return _read_top_pages_by_prefix(f"{window_key}#")
+
+
+def read_top_pages_for_wiki(wiki: str, window_key: str) -> List[Dict[str, Any]]:
+    # Top pages restricted to a single wiki topic.
+    # The realtime processor already stores TOP_PAGES with this SK shape:
+    # WINDOW#{minute}#WIKI#{wiki}#TITLE#{hash}
+    return _read_top_pages_by_prefix(f"{window_key}#WIKI#{wiki}#")
+
+
+def read_wiki_bot_activity(wiki: str, window_key: str) -> Tuple[int, int, float]:
+    bot_count = get_metric_count(
+        f"METRIC#WIKI_BOT_ACTIVITY#WIKI#{wiki}#BOT#true",
+        window_key,
+    )
+    human_count = get_metric_count(
+        f"METRIC#WIKI_BOT_ACTIVITY#WIKI#{wiki}#BOT#false",
+        window_key,
+    )
+
+    total = bot_count + human_count
+    bot_ratio = round(bot_count / total, 4) if total > 0 else 0.0
+
+    return bot_count, human_count, bot_ratio
+
+
+def read_wiki_change_types(wiki: str, window_key: str) -> Dict[str, int]:
+    result: Dict[str, int] = {}
+
+    for change_type in CHANGE_TYPES:
+        metric_key = f"METRIC#WIKI_CHANGE_TYPE#WIKI#{wiki}#TYPE#{change_type}"
+        count = get_metric_count(metric_key, window_key)
+
+        if count > 0:
+            result[change_type] = count
+
+    return result
+
+
+def read_wiki_namespace_distribution(wiki: str, window_key: str) -> Dict[str, int]:
+    result: Dict[str, int] = {}
+
+    for namespace in NAMESPACES:
+        metric_key = f"METRIC#WIKI_NAMESPACE#WIKI#{wiki}#NS#{namespace}"
+        count = get_metric_count(metric_key, window_key)
+
+        if count > 0:
+            result[str(namespace)] = count
+
+    return result
 
 
 def read_wiki_activity(wiki: str, window_key: str) -> int:
@@ -440,6 +497,12 @@ def build_wiki_message(
     aggregation_window: str,
     broadcast_window: str,
     current_minute_events_so_far: int,
+    bot_count: int,
+    human_count: int,
+    bot_ratio: float,
+    change_types: Dict[str, int],
+    namespace_distribution: Dict[str, int],
+    top_pages: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     return {
         "type": "stats.update",
@@ -451,15 +514,23 @@ def build_wiki_message(
         "data": {
             "wiki": wiki,
             "current_minute_events_so_far": current_minute_events_so_far,
+            "bot_count": bot_count,
+            "human_count": human_count,
+            "bot_ratio": bot_ratio,
+            "top_wikis": [],
+            "change_types": change_types,
+            "namespace_distribution": namespace_distribution,
+            "top_pages": top_pages,
         },
     }
-
 
 def build_top_pages_message(
     aggregation_window: str,
     broadcast_window: str,
     top_pages: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    current_minute_events_so_far = sum(to_int(page.get("count"), 0) for page in top_pages)
+
     return {
         "type": "stats.update",
         "topic": "top_pages",
@@ -468,6 +539,7 @@ def build_top_pages_message(
         "broadcast_window": broadcast_window,
         "is_partial_window": is_partial_window(aggregation_window),
         "data": {
+            "current_minute_events_so_far": current_minute_events_so_far,
             "top_pages": top_pages,
         },
     }
@@ -685,12 +757,25 @@ def process_aggregation_window(
             continue
 
         wiki_count = read_wiki_activity(wiki, window_key)
+        wiki_bot_count, wiki_human_count, wiki_bot_ratio = read_wiki_bot_activity(
+            wiki,
+            window_key,
+        )
+        wiki_change_types = read_wiki_change_types(wiki, window_key)
+        wiki_namespace_distribution = read_wiki_namespace_distribution(wiki, window_key)
+        wiki_top_pages = read_top_pages_for_wiki(wiki, window_key)
 
         wiki_message = build_wiki_message(
             wiki=wiki,
             aggregation_window=aggregation_window,
             broadcast_window=broadcast_window,
             current_minute_events_so_far=wiki_count,
+            bot_count=wiki_bot_count,
+            human_count=wiki_human_count,
+            bot_ratio=wiki_bot_ratio,
+            change_types=wiki_change_types,
+            namespace_distribution=wiki_namespace_distribution,
+            top_pages=wiki_top_pages,
         )
 
         result = send_message_to_connections(subscribers, wiki_message)

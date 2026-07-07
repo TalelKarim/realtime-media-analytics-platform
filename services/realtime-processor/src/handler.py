@@ -110,6 +110,25 @@ def _is_namespace_zero(namespace: Any) -> bool:
         return False
 
 
+def _safe_bool(value: Any) -> bool:
+    """
+    Normalize boolean values coming from Wikimedia / collector payloads.
+
+    The current collector sends a real boolean, but this keeps the processor
+    safe if a future source sends "true" / "false" as strings.
+    """
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y"}
+
+    return False
+
+
 def _add_counter(
     counters: dict[tuple[str, str], dict[str, Any]],
     metric_key: str,
@@ -162,7 +181,7 @@ def _extract_normalized_event(envelope: dict[str, Any]) -> dict[str, Any] | None
     # Support both possible contract names:
     # target contract uses "user_is_bot"; older collector versions may use "bot".
     bot = payload.get("user_is_bot", payload.get("bot", False))
-    is_bot = bool(bot)
+    is_bot = _safe_bool(bot)
 
     return {
         "event_id": event_id,
@@ -194,6 +213,8 @@ def _build_counters(
         common_attrs = {
             "window_start": window_start_iso,
         }
+
+        is_bot_text = str(event["is_bot"]).lower()
 
         # 1. Global activity, write-sharded by event_id.
         global_shard_id = _compute_shard_id(
@@ -246,15 +267,38 @@ def _build_counters(
             },
         )
 
-        # 5. Bot vs human.
-        is_bot_text = str(event["is_bot"]).lower()
+        # 4b. Per-wiki change type distribution.
+        # Used by topic subscriptions such as wiki:frwiki.
+        _add_counter(
+            counters,
+            metric_key=f"METRIC#WIKI_CHANGE_TYPE#WIKI#{event['wiki']}#TYPE#{event['change_type']}",
+            window_key=window_key,
+            attrs={
+                **common_attrs,
+                "wiki": event["wiki"],
+                "change_type": event["change_type"],
+            },
+        )
 
+        # 5. Bot vs human.
         _add_counter(
             counters,
             metric_key=f"METRIC#BOT_ACTIVITY#BOT#{is_bot_text}",
             window_key=window_key,
             attrs={
                 **common_attrs,
+                "is_bot": event["is_bot"],
+            },
+        )
+
+        # 5b. Per-wiki bot vs human distribution.
+        _add_counter(
+            counters,
+            metric_key=f"METRIC#WIKI_BOT_ACTIVITY#WIKI#{event['wiki']}#BOT#{is_bot_text}",
+            window_key=window_key,
+            attrs={
+                **common_attrs,
+                "wiki": event["wiki"],
                 "is_bot": event["is_bot"],
             },
         )
@@ -266,6 +310,18 @@ def _build_counters(
             window_key=window_key,
             attrs={
                 **common_attrs,
+                "namespace": event["namespace_key"],
+            },
+        )
+
+        # 6b. Per-wiki namespace distribution.
+        _add_counter(
+            counters,
+            metric_key=f"METRIC#WIKI_NAMESPACE#WIKI#{event['wiki']}#NS#{event['namespace_key']}",
+            window_key=window_key,
+            attrs={
+                **common_attrs,
+                "wiki": event["wiki"],
                 "namespace": event["namespace_key"],
             },
         )
