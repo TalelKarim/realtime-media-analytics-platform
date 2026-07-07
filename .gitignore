@@ -22,3 +22,5 @@ env.local.sh
 
 
 node_modules/
+
+dist/
