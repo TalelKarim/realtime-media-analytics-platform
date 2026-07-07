@@ -37,9 +37,6 @@ resource "aws_acm_certificate" "dashboard" {
   domain_name       = var.wiki_domain_name
   validation_method = "DNS"
 
-  subject_alternative_names = [
-    var.domain_name
-  ]
 
   tags = var.common_tags
 
@@ -51,7 +48,7 @@ resource "aws_acm_certificate" "dashboard" {
 resource "aws_route53_record" "cert_validation" {
   for_each = {
     for dvo in aws_acm_certificate.dashboard.domain_validation_options :
-    dvo.wiki_domain_name => {
+    dvo.domain_name => {
       name   = dvo.resource_record_name
       type   = dvo.resource_record_type
       record = dvo.resource_record_value
