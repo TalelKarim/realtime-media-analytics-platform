@@ -76,7 +76,6 @@ resource "aws_cloudfront_distribution" "dashboard" {
 
   aliases = [
     var.wiki_domain_name,
-    var.domain_name
   ]
 
   origin {
