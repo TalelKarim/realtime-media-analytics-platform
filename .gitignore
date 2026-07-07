@@ -21,5 +21,4 @@ env.local.sh
 
 
 
-
-.github
+node_modules/
