@@ -26,7 +26,7 @@ module "realtime_processor_lambda" {
     BROADCAST_QUEUE_URL   = module.sqs.broadcast_signal_queue_url
 
     AGGREGATION_WINDOW_SECONDS  = "60"
-    BROADCAST_WINDOW_SECONDS    = "2"
+    BROADCAST_WINDOW_SECONDS    = "5"
     GLOBAL_ACTIVITY_SHARD_COUNT = "10"
     AGGREGATE_TTL_DAYS          = "2"
   }
@@ -43,7 +43,7 @@ resource "aws_lambda_event_source_mapping" "realtime_processor_kinesis" {
   starting_position = "LATEST"
 
   batch_size                         = 100
-  maximum_batching_window_in_seconds = 2
+  maximum_batching_window_in_seconds = 5
 
   enabled = true
 }
