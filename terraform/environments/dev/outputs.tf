@@ -360,3 +360,23 @@ output "quicksight_gold_dataset_arns" {
 output "quicksight_gold_dataset_ids" {
   value = module.quicksight.quicksight_gold_dataset_ids
 }
+
+
+
+# Realtime Dashboard 
+
+output "website_bucket_name" {
+  value = module.realtime_dashboard.dashboard_bucket_name
+}
+
+output "cloudfront_distribution_domain_name" {
+  value = module.realtime_dashboard.cloudfront_distribution_domain_name
+}
+
+output "cloudfront_distribution_id" {
+  value = module.realtime_dashboard.cloudfront_distribution_id
+}
+
+output "github_actions_role_arn" {
+  value = module.realtime_dashboard.github_actions_role_arn
+}
