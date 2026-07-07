@@ -10,7 +10,7 @@ data "aws_cloudfront_cache_policy" "caching_optimized" {
 
 
 resource "aws_s3_bucket" "dashboard" {
-  bucket = replace(var.www_domain_name, ".", "-")
+  bucket = replace(var.wiki_domain_name, ".", "-")
 
   tags = var.common_tags
 }
@@ -25,8 +25,8 @@ resource "aws_s3_bucket_public_access_block" "dashboard" {
 }
 
 resource "aws_cloudfront_origin_access_control" "dashboard" {
-  name                              = "${var.www_domain_name}-oac"
-  description                       = "OAC for ${var.www_domain_name}"
+  name                              = "${var.wiki_domain_name}-oac"
+  description                       = "OAC for ${var.wiki_domain_name}"
   origin_access_control_origin_type = "s3"
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
@@ -34,7 +34,7 @@ resource "aws_cloudfront_origin_access_control" "dashboard" {
 
 resource "aws_acm_certificate" "dashboard" {
   provider          = aws.us_east_1
-  domain_name       = var.www_domain_name
+  domain_name       = var.wiki_domain_name
   validation_method = "DNS"
 
   subject_alternative_names = [
@@ -51,7 +51,7 @@ resource "aws_acm_certificate" "dashboard" {
 resource "aws_route53_record" "cert_validation" {
   for_each = {
     for dvo in aws_acm_certificate.dashboard.domain_validation_options :
-    dvo.domain_name => {
+    dvo.wiki_domain_name => {
       name   = dvo.resource_record_name
       type   = dvo.resource_record_type
       record = dvo.resource_record_value
@@ -74,11 +74,11 @@ resource "aws_acm_certificate_validation" "dashboard" {
 resource "aws_cloudfront_distribution" "dashboard" {
   enabled             = true
   is_ipv6_enabled     = true
-  comment             = var.www_domain_name
+  comment             = var.wiki_domain_name
   default_root_object = "index.html"
 
   aliases = [
-    var.www_domain_name,
+    var.wiki_domain_name,
     var.domain_name
   ]
 
@@ -156,21 +156,9 @@ resource "aws_s3_bucket_policy" "dashboard" {
   policy = data.aws_iam_policy_document.dashboard_bucket_policy.json
 }
 
-resource "aws_route53_record" "www" {
+resource "aws_route53_record" "wiki" {
   zone_id = data.aws_route53_zone.main.zone_id
-  name    = var.www_domain_name
-  type    = "A"
-
-  alias {
-    name                   = aws_cloudfront_distribution.dashboard.domain_name
-    zone_id                = aws_cloudfront_distribution.dashboard.hosted_zone_id
-    evaluate_target_health = false
-  }
-}
-
-resource "aws_route53_record" "root" {
-  zone_id = data.aws_route53_zone.main.zone_id
-  name    = var.domain_name
+  name    = var.wiki_domain_name
   type    = "A"
 
   alias {
@@ -208,7 +196,7 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
 }
 
 resource "aws_iam_role" "github_actions_deploy" {
-  name               = "github-actions-${replace(var.www_domain_name, ".", "-")}"
+  name               = "github-actions-${replace(var.wiki_domain_name, ".", "-")}"
   assume_role_policy = data.aws_iam_policy_document.github_actions_assume_role.json
 
   tags = var.common_tags

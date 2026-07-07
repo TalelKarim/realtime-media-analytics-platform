@@ -2,9 +2,10 @@ module "realtime_dashboard" {
   source = "../../modules/realtime_dashboard"
 
   domain_name       = var.domain_name
-  www_domain_name   = var.www_domain_name
+  
   github_repository = var.github_repository
   common_tags       = var.tags
+
 
   providers = {
     aws           = aws

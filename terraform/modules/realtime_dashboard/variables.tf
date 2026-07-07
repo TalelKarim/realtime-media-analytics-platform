@@ -1,13 +1,13 @@
 variable "domain_name" {
   description = "Root domain name."
   type        = string
-  default     = "wiki.talelkarimchebbi.com"
+  default     = "talelkarimchebbi.com"
 }
 
-variable "www_domain_name" {
+variable "wiki_domain_name" {
   description = "WWW domain name."
   type        = string
-  default     = "realtime.wiki.talelkarimchebbi.com"
+  default     = "wiki.talelkarimchebbi.com"
 }
 
 variable "github_repository" {
