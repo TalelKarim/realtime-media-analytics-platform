@@ -7,7 +7,7 @@ variable "domain_name" {
 variable "www_domain_name" {
   description = "WWW domain name."
   type        = string
-  default     = "realtimeWiki.talelkarimchebbi.com"
+  default     = "realtimewiki.talelkarimchebbi.com"
 }
 
 variable "github_repository" {
