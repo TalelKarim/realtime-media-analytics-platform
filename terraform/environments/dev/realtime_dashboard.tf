@@ -1,8 +1,8 @@
 module "realtime_dashboard" {
   source = "../../modules/realtime_dashboard"
 
-  domain_name       = var.domain_name
-  
+  domain_name = var.domain_name
+
   github_repository = var.github_repository
   common_tags       = var.tags
 

@@ -380,3 +380,16 @@ output "cloudfront_distribution_id" {
 output "github_actions_role_arn" {
   value = module.realtime_dashboard.github_actions_role_arn
 }
+
+
+# grafana
+
+output "grafana_aws_integration_role_arn" {
+  description = "IAM role ARN to configure in Grafana Cloud."
+  value       = module.grafana_aws_integration.role_arn
+}
+
+output "grafana_aws_integration_role_name" {
+  description = "IAM role name used by Grafana Cloud."
+  value       = module.grafana_aws_integration.role_name
+}

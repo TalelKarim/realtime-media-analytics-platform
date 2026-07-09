@@ -38,3 +38,8 @@ collector_log_level              = "INFO"
 
 # quicksight
 quicksight_principal_arn = "arn:aws:quicksight:us-east-1:156358246560:user/default/156358246560"
+
+
+grafana_aws_account_id = "008923505280"
+grafana_external_id    = "3355686"
+
