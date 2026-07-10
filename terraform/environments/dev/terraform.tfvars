@@ -36,7 +36,7 @@ collector_log_level              = "INFO"
 
 
 # grafana 
-grafana_otlp_endpoint = "https://otlp-gateway-xxx.grafana.net/otlp"
+grafana_otlp_endpoint = "https://otlp-gateway-prod-eu-west-6.grafana.net/otlp"
 
 
 
