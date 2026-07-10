@@ -15,7 +15,7 @@ from botocore.exceptions import ClientError
 from opentelemetry import trace as otel_trace
 from opentelemetry.trace import Status, StatusCode
 
-from observability import (
+from .observability import (
     active_connections_scanned,
     broadcast_completed_total,
     broadcast_duration_ms,

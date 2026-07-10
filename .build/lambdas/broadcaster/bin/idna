@@ -1,4 +1,4 @@
-#!/Library/Developer/CommandLineTools/usr/bin/python3
+#!/Users/tchebbi.ext/aws-learning/realtime-media-analytics-platform/services/broadcaster/.venv/bin/python3
 # -*- coding: utf-8 -*-
 import re
 import sys
