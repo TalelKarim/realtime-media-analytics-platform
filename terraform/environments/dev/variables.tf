@@ -163,3 +163,15 @@ variable "grafana_external_id" {
   type        = string
   sensitive   = true
 }
+
+
+
+variable "grafana_otlp_endpoint" {
+  type        = string
+  description = "Grafana Cloud OTLP endpoint"
+}
+
+variable "grafana_otlp_headers" {
+  type        = string
+  description = "Grafana Cloud OTLP auth headers"
+}

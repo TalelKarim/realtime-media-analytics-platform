@@ -35,6 +35,10 @@ collector_log_level              = "INFO"
 
 
 
+# grafana 
+grafana_otlp_endpoint = "https://otlp-gateway-xxx.grafana.net/otlp"
+
+
 
 # quicksight
 quicksight_principal_arn = "arn:aws:quicksight:us-east-1:156358246560:user/default/156358246560"

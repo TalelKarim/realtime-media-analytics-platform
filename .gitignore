@@ -18,6 +18,9 @@ __pycache__/
 env.local.sh
 
 
+.pytest*
+test*
+tests/
 
 
 node_modules/

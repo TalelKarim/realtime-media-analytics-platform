@@ -11,6 +11,25 @@ from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 
+
+from opentelemetry import trace as otel_trace
+from opentelemetry.trace import Status, StatusCode
+
+from observability import (
+    active_connections_scanned,
+    broadcast_completed_total,
+    broadcast_duration_ms,
+    broadcast_failed_total,
+    flush_otel,
+    tracer,
+    websocket_connection_gone_total,
+    websocket_messages_sent_total,
+    websocket_post_duration_ms,
+    websocket_post_failure_total,
+    websocket_post_success_total,
+)
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -163,8 +182,12 @@ def log_json(level: str, message: str, **fields: Any) -> None:
     Emit one structured JSON log line.
 
     The log is intentionally written as JSON in the message body so CloudWatch
-    Logs Insights, Grafana Loki, and future OpenTelemetry pipelines can extract
+    Logs Insights, Grafana Loki, and OpenTelemetry-aware pipelines can extract
     fields consistently.
+
+    If an OpenTelemetry span is active, trace_id and span_id are added to the log
+    line. Logs still go through CloudWatch -> Promtail -> Loki; they are simply
+    enriched with trace context.
     """
     payload = {
         "message": message,
@@ -173,6 +196,11 @@ def log_json(level: str, message: str, **fields: Any) -> None:
         "environment": ENVIRONMENT,
         **fields,
     }
+
+    span_context = otel_trace.get_current_span().get_span_context()
+    if span_context and span_context.is_valid:
+        payload["trace_id"] = format(span_context.trace_id, "032x")
+        payload["span_id"] = format(span_context.span_id, "016x")
 
     log_line = json.dumps(json_safe(payload), default=str)
 
@@ -187,6 +215,9 @@ def log_json(level: str, message: str, **fields: Any) -> None:
 def log_exception(message: str, **fields: Any) -> None:
     """
     Emit a structured JSON error log and keep the Python stack trace.
+
+    If an OpenTelemetry span is active, trace_id and span_id are added to the log
+    line so Grafana can correlate Loki logs with Tempo traces.
     """
     payload = {
         "message": message,
@@ -195,6 +226,11 @@ def log_exception(message: str, **fields: Any) -> None:
         "environment": ENVIRONMENT,
         **fields,
     }
+
+    span_context = otel_trace.get_current_span().get_span_context()
+    if span_context and span_context.is_valid:
+        payload["trace_id"] = format(span_context.trace_id, "032x")
+        payload["span_id"] = format(span_context.span_id, "016x")
 
     logger.exception(json.dumps(json_safe(payload), default=str))
 
@@ -608,6 +644,7 @@ def delete_connection(connection_id: str) -> None:
         }
     )
 
+    
 
 def post_to_connection(
     connection_id: str,
@@ -616,52 +653,102 @@ def post_to_connection(
     topic: Optional[str] = None,
 ) -> str:
     payload = json.dumps(json_safe(message), separators=(",", ":")).encode("utf-8")
+    normalized_topic = topic or str(message.get("topic", "unknown"))
+    start_time = time.perf_counter()
 
-    try:
-        apigw_management.post_to_connection(
-            ConnectionId=connection_id,
-            Data=payload,
-        )
-        return "sent"
+    metric_attrs = {
+        "topic": normalized_topic,
+    }
 
-    except ClientError as error:
-        if is_gone_exception(error):
-            log_json(
-                "INFO",
-                "gone_connection_cleaned",
+    with tracer.start_as_current_span("broadcaster.post_to_connection") as span:
+        span.set_attribute("messaging.destination.name", normalized_topic)
+        span.set_attribute("aws.service", "apigatewaymanagementapi")
+        span.set_attribute("rpc.method", "post_to_connection")
+
+        try:
+            apigw_management.post_to_connection(
+                ConnectionId=connection_id,
+                Data=payload,
+            )
+
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+            websocket_post_success_total.add(1, metric_attrs)
+            websocket_messages_sent_total.add(1, metric_attrs)
+            websocket_post_duration_ms.record(duration_ms, metric_attrs)
+
+            span.set_attribute("websocket.post.result", "sent")
+            span.set_status(Status(StatusCode.OK))
+
+            return "sent"
+
+        except ClientError as error:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            websocket_post_duration_ms.record(duration_ms, metric_attrs)
+
+            if is_gone_exception(error):
+                websocket_connection_gone_total.add(1, metric_attrs)
+
+                span.set_attribute("websocket.post.result", "gone")
+                span.set_status(Status(StatusCode.OK))
+
+                log_json(
+                    "INFO",
+                    "gone_connection_cleaned",
+                    aws_request_id=aws_request_id,
+                    connection_id=connection_id,
+                    topic=normalized_topic,
+                )
+                delete_connection(connection_id)
+                return "gone"
+
+            failure_attrs = {
+                **metric_attrs,
+                "error_type": type(error).__name__,
+            }
+
+            websocket_post_failure_total.add(1, failure_attrs)
+
+            span.record_exception(error)
+            span.set_attribute("websocket.post.result", "error")
+            span.set_attribute("error.type", type(error).__name__)
+            span.set_status(Status(StatusCode.ERROR, str(error)))
+
+            log_exception(
+                "websocket_post_failed",
                 aws_request_id=aws_request_id,
                 connection_id=connection_id,
-                topic=topic,
+                topic=normalized_topic,
+                error_type=type(error).__name__,
+                error_message=str(error),
             )
-            delete_connection(connection_id)
-            return "gone"
+            return "error"
 
-        # Existing behavior preserved for API Gateway ClientError cases:
-        # log the failed post, count it as a post error, but do not retry the whole SQS message.
-        log_exception(
-            "websocket_post_failed",
-            aws_request_id=aws_request_id,
-            connection_id=connection_id,
-            topic=topic,
-            error_type=type(error).__name__,
-            error_message=str(error),
-        )
-        return "error"
+        except Exception as error:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            websocket_post_duration_ms.record(duration_ms, metric_attrs)
 
-    except Exception as error:
-        # Network/DNS/endpoint-level failures are not ClientError.
-        # Example: broken WEBSOCKET_ENDPOINT_URL -> EndpointConnectionError / urllib3 socket error.
-        # This is a platform/configuration failure, so we log it as websocket_post_failed
-        # and re-raise to force SQS retry via batchItemFailures.
-        log_exception(
-            "websocket_post_failed",
-            aws_request_id=aws_request_id,
-            connection_id=connection_id,
-            topic=topic,
-            error_type=type(error).__name__,
-            error_message=str(error),
-        )
-        raise
+            failure_attrs = {
+                **metric_attrs,
+                "error_type": type(error).__name__,
+            }
+
+            websocket_post_failure_total.add(1, failure_attrs)
+
+            span.record_exception(error)
+            span.set_attribute("websocket.post.result", "exception")
+            span.set_attribute("error.type", type(error).__name__)
+            span.set_status(Status(StatusCode.ERROR, str(error)))
+
+            log_exception(
+                "websocket_post_failed",
+                aws_request_id=aws_request_id,
+                connection_id=connection_id,
+                topic=normalized_topic,
+                error_type=type(error).__name__,
+                error_message=str(error),
+            )
+            raise
 
 
 def send_message_to_connections(
@@ -795,175 +882,272 @@ def process_aggregation_window(
     start_time = time.perf_counter()
     window_key = normalize_window_key(aggregation_window)
 
-    (
-        global_connections,
-        wiki_connections,
-        top_pages_connections,
-        required_wikis,
-    ) = collect_required_topics(connections)
-
-    metrics = {
-        "connections_scanned": len(connections),
-        "messages_sent": 0,
-        "gone_connections": 0,
-        "post_errors": 0,
+    metric_base_attrs = {
+        "environment": ENVIRONMENT,
     }
 
-    # Nothing to send.
-    if not global_connections and not wiki_connections and not top_pages_connections:
-        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-        log_json(
-            "INFO",
-            "broadcast_skipped",
-            aws_request_id=aws_request_id,
-            reason="no_matching_subscriptions",
-            aggregation_window=aggregation_window,
-            broadcast_window=broadcast_window,
-            duration_ms=duration_ms,
-            **metrics,
-        )
-        return metrics
+    with tracer.start_as_current_span("broadcaster.process_aggregation_window") as span:
+        span.set_attribute("broadcast.aggregation_window", aggregation_window)
+        span.set_attribute("broadcast.broadcast_window", broadcast_window)
+        span.set_attribute("broadcast.connections_scanned", len(connections))
 
-    # Read top_pages once if it is needed by global message or by top_pages topic.
-    top_pages: List[Dict[str, Any]] = []
-    top_pages_needed = bool(global_connections) or bool(top_pages_connections)
+        try:
+            (
+                global_connections,
+                wiki_connections,
+                top_pages_connections,
+                required_wikis,
+            ) = collect_required_topics(connections)
 
-    if top_pages_needed:
-        top_pages = read_top_pages(window_key)
+            span.set_attribute("broadcast.global_subscribers", len(global_connections))
+            span.set_attribute("broadcast.top_pages_subscribers", len(top_pages_connections))
+            span.set_attribute("broadcast.wiki_topic_count", len(required_wikis))
 
-    # Global message.
-    # The global payload intentionally includes top_pages, as defined in Contract 5.
-    if global_connections:
-        current_minute_events_so_far = read_global_activity(window_key)
-        bot_count, human_count, bot_ratio = read_bot_activity(window_key)
-        change_types = read_change_types(window_key)
-        namespace_distribution = read_namespace_distribution(window_key)
-        top_wikis = read_top_wikis(window_key)
+            metrics = {
+                "connections_scanned": len(connections),
+                "messages_sent": 0,
+                "gone_connections": 0,
+                "post_errors": 0,
+            }
 
-        global_message = build_global_message(
-            aggregation_window=aggregation_window,
-            broadcast_window=broadcast_window,
-            current_minute_events_so_far=current_minute_events_so_far,
-            bot_count=bot_count,
-            human_count=human_count,
-            bot_ratio=bot_ratio,
-            top_wikis=top_wikis,
-            change_types=change_types,
-            namespace_distribution=namespace_distribution,
-            top_pages=top_pages,
-        )
+            # Nothing to send.
+            if not global_connections and not wiki_connections and not top_pages_connections:
+                duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
-        result = send_message_to_connections(
-            global_connections,
-            global_message,
-            aws_request_id=aws_request_id,
-            topic="global",
-        )
-        metrics["messages_sent"] += result["sent"]
-        metrics["gone_connections"] += result["gone"]
-        metrics["post_errors"] += result["errors"]
+                broadcast_duration_ms.record(
+                    duration_ms,
+                    {
+                        **metric_base_attrs,
+                        "result": "skipped",
+                    },
+                )
 
-    # Wiki-specific messages.
-    for wiki in sorted(required_wikis):
-        topic = f"wiki:{wiki}"
-        subscribers = wiki_connections.get(topic, [])
+                span.set_attribute("broadcast.result", "skipped")
+                span.set_attribute("broadcast.reason", "no_matching_subscriptions")
+                span.set_attribute("broadcast.duration_ms", duration_ms)
+                span.set_status(Status(StatusCode.OK))
 
-        if not subscribers:
-            continue
+                log_json(
+                    "INFO",
+                    "broadcast_skipped",
+                    aws_request_id=aws_request_id,
+                    reason="no_matching_subscriptions",
+                    aggregation_window=aggregation_window,
+                    broadcast_window=broadcast_window,
+                    duration_ms=duration_ms,
+                    **metrics,
+                )
+                return metrics
 
-        wiki_count = read_wiki_activity(wiki, window_key)
-        wiki_bot_count, wiki_human_count, wiki_bot_ratio = read_wiki_bot_activity(
-            wiki,
-            window_key,
-        )
-        wiki_change_types = read_wiki_change_types(wiki, window_key)
-        wiki_namespace_distribution = read_wiki_namespace_distribution(wiki, window_key)
-        wiki_top_pages = read_top_pages_for_wiki(wiki, window_key)
+            # Read top_pages once if it is needed by global message or by top_pages topic.
+            top_pages: List[Dict[str, Any]] = []
+            top_pages_needed = bool(global_connections) or bool(top_pages_connections)
 
-        wiki_message = build_wiki_message(
-            wiki=wiki,
-            aggregation_window=aggregation_window,
-            broadcast_window=broadcast_window,
-            current_minute_events_so_far=wiki_count,
-            bot_count=wiki_bot_count,
-            human_count=wiki_human_count,
-            bot_ratio=wiki_bot_ratio,
-            change_types=wiki_change_types,
-            namespace_distribution=wiki_namespace_distribution,
-            top_pages=wiki_top_pages,
-        )
+            if top_pages_needed:
+                top_pages = read_top_pages(window_key)
 
-        result = send_message_to_connections(
-            subscribers,
-            wiki_message,
-            aws_request_id=aws_request_id,
-            topic=topic,
-        )
-        metrics["messages_sent"] += result["sent"]
-        metrics["gone_connections"] += result["gone"]
-        metrics["post_errors"] += result["errors"]
+            # Global message.
+            # The global payload intentionally includes top_pages, as defined in Contract 5.
+            if global_connections:
+                current_minute_events_so_far = read_global_activity(window_key)
+                bot_count, human_count, bot_ratio = read_bot_activity(window_key)
+                change_types = read_change_types(window_key)
+                namespace_distribution = read_namespace_distribution(window_key)
+                top_wikis = read_top_wikis(window_key)
 
-    # Optional top_pages standalone topic.
-    if top_pages_connections:
-        top_pages_message = build_top_pages_message(
-            aggregation_window=aggregation_window,
-            broadcast_window=broadcast_window,
-            top_pages=top_pages,
-        )
+                global_message = build_global_message(
+                    aggregation_window=aggregation_window,
+                    broadcast_window=broadcast_window,
+                    current_minute_events_so_far=current_minute_events_so_far,
+                    bot_count=bot_count,
+                    human_count=human_count,
+                    bot_ratio=bot_ratio,
+                    top_wikis=top_wikis,
+                    change_types=change_types,
+                    namespace_distribution=namespace_distribution,
+                    top_pages=top_pages,
+                )
 
-        result = send_message_to_connections(
-            top_pages_connections,
-            top_pages_message,
-            aws_request_id=aws_request_id,
-            topic="top_pages",
-        )
-        metrics["messages_sent"] += result["sent"]
-        metrics["gone_connections"] += result["gone"]
-        metrics["post_errors"] += result["errors"]
+                result = send_message_to_connections(
+                    global_connections,
+                    global_message,
+                    aws_request_id=aws_request_id,
+                    topic="global",
+                )
+                metrics["messages_sent"] += result["sent"]
+                metrics["gone_connections"] += result["gone"]
+                metrics["post_errors"] += result["errors"]
 
-    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-    log_json(
-        "INFO",
-        "broadcast_completed",
-        aws_request_id=aws_request_id,
-        aggregation_window=aggregation_window,
-        broadcast_window=broadcast_window,
-        duration_ms=duration_ms,
-        **metrics,
-    )
+            # Wiki-specific messages.
+            for wiki in sorted(required_wikis):
+                topic = f"wiki:{wiki}"
+                subscribers = wiki_connections.get(topic, [])
 
-    return metrics
+                if not subscribers:
+                    continue
+
+                wiki_count = read_wiki_activity(wiki, window_key)
+                wiki_bot_count, wiki_human_count, wiki_bot_ratio = read_wiki_bot_activity(
+                    wiki,
+                    window_key,
+                )
+                wiki_change_types = read_wiki_change_types(wiki, window_key)
+                wiki_namespace_distribution = read_wiki_namespace_distribution(wiki, window_key)
+                wiki_top_pages = read_top_pages_for_wiki(wiki, window_key)
+
+                wiki_message = build_wiki_message(
+                    wiki=wiki,
+                    aggregation_window=aggregation_window,
+                    broadcast_window=broadcast_window,
+                    current_minute_events_so_far=wiki_count,
+                    bot_count=wiki_bot_count,
+                    human_count=wiki_human_count,
+                    bot_ratio=wiki_bot_ratio,
+                    change_types=wiki_change_types,
+                    namespace_distribution=wiki_namespace_distribution,
+                    top_pages=wiki_top_pages,
+                )
+
+                result = send_message_to_connections(
+                    subscribers,
+                    wiki_message,
+                    aws_request_id=aws_request_id,
+                    topic=topic,
+                )
+                metrics["messages_sent"] += result["sent"]
+                metrics["gone_connections"] += result["gone"]
+                metrics["post_errors"] += result["errors"]
+
+            # Optional top_pages standalone topic.
+            if top_pages_connections:
+                top_pages_message = build_top_pages_message(
+                    aggregation_window=aggregation_window,
+                    broadcast_window=broadcast_window,
+                    top_pages=top_pages,
+                )
+
+                result = send_message_to_connections(
+                    top_pages_connections,
+                    top_pages_message,
+                    aws_request_id=aws_request_id,
+                    topic="top_pages",
+                )
+                metrics["messages_sent"] += result["sent"]
+                metrics["gone_connections"] += result["gone"]
+                metrics["post_errors"] += result["errors"]
+
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+            broadcast_completed_total.add(
+                1,
+                {
+                    **metric_base_attrs,
+                    "result": "completed",
+                },
+            )
+            broadcast_duration_ms.record(
+                duration_ms,
+                {
+                    **metric_base_attrs,
+                    "result": "completed",
+                },
+            )
+
+            span.set_attribute("broadcast.result", "completed")
+            span.set_attribute("broadcast.duration_ms", duration_ms)
+            span.set_attribute("broadcast.messages_sent", metrics["messages_sent"])
+            span.set_attribute("broadcast.gone_connections", metrics["gone_connections"])
+            span.set_attribute("broadcast.post_errors", metrics["post_errors"])
+            span.set_status(Status(StatusCode.OK))
+
+            log_json(
+                "INFO",
+                "broadcast_completed",
+                aws_request_id=aws_request_id,
+                aggregation_window=aggregation_window,
+                broadcast_window=broadcast_window,
+                duration_ms=duration_ms,
+                **metrics,
+            )
+
+            return metrics
+
+        except Exception as error:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+            failure_attrs = {
+                **metric_base_attrs,
+                "error_type": type(error).__name__,
+            }
+
+            broadcast_failed_total.add(1, failure_attrs)
+            broadcast_duration_ms.record(
+                duration_ms,
+                {
+                    **failure_attrs,
+                    "result": "failed",
+                },
+            )
+
+            span.record_exception(error)
+            span.set_attribute("broadcast.result", "failed")
+            span.set_attribute("broadcast.duration_ms", duration_ms)
+            span.set_attribute("error.type", type(error).__name__)
+            span.set_status(Status(StatusCode.ERROR, str(error)))
+
+            raise
 
 
 def process_sqs_record(record: Dict[str, Any], aws_request_id: Optional[str] = None) -> None:
-    message = parse_sqs_body(record, aws_request_id=aws_request_id)
+    with tracer.start_as_current_span("broadcaster.process_sqs_record") as span:
+        message_id = record.get("messageId")
+        if message_id:
+            span.set_attribute("messaging.message.id", str(message_id))
 
-    # Malformed messages are skipped, not retried forever.
-    if message is None:
-        return
+        message = parse_sqs_body(record, aws_request_id=aws_request_id)
 
-    broadcast_window = message["broadcast_window"]
-    aggregation_windows = message["aggregation_windows"]
+        # Malformed messages are skipped, not retried forever.
+        if message is None:
+            span.set_attribute("sqs.record.result", "skipped")
+            span.set_status(Status(StatusCode.OK))
+            return
 
-    connections = scan_connections()
+        broadcast_window = message["broadcast_window"]
+        aggregation_windows = message["aggregation_windows"]
 
-    log_json(
-        "INFO",
-        "broadcast_signal_received",
-        aws_request_id=aws_request_id,
-        broadcast_window=broadcast_window,
-        aggregation_windows=aggregation_windows,
-        aggregation_window_count=len(aggregation_windows),
-        connections_scanned=len(connections),
-    )
+        span.set_attribute("broadcast.broadcast_window", str(broadcast_window))
+        span.set_attribute("broadcast.aggregation_window_count", len(aggregation_windows))
 
-    for aggregation_window in aggregation_windows:
-        process_aggregation_window(
-            aggregation_window=str(aggregation_window),
-            broadcast_window=str(broadcast_window),
-            connections=connections,
-            aws_request_id=aws_request_id,
+        connections = scan_connections()
+
+        active_connections_scanned.record(
+            len(connections),
+            {
+                "environment": ENVIRONMENT,
+                "source": "websocket_connections",
+            },
         )
+
+        log_json(
+            "INFO",
+            "broadcast_signal_received",
+            aws_request_id=aws_request_id,
+            broadcast_window=broadcast_window,
+            aggregation_windows=aggregation_windows,
+            aggregation_window_count=len(aggregation_windows),
+            connections_scanned=len(connections),
+        )
+
+        for aggregation_window in aggregation_windows:
+            process_aggregation_window(
+                aggregation_window=str(aggregation_window),
+                broadcast_window=str(broadcast_window),
+                connections=connections,
+                aws_request_id=aws_request_id,
+            )
+
+        span.set_attribute("sqs.record.result", "processed")
+        span.set_status(Status(StatusCode.OK))
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -981,46 +1165,73 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     batch_item_failures = []
 
     records = event.get("Records", [])
-    log_json(
-        "INFO",
-        "broadcaster_invoked",
-        aws_request_id=aws_request_id,
-        sqs_record_count=len(records),
-    )
 
-    for record in records:
-        message_id = record.get("messageId")
+    try:
+        with tracer.start_as_current_span("broadcaster.lambda_handler") as span:
+            span.set_attribute("faas.trigger", "sqs")
+            span.set_attribute("faas.execution", aws_request_id or "unknown")
+            span.set_attribute("sqs.record_count", len(records))
 
-        try:
-            process_sqs_record(record, aws_request_id=aws_request_id)
-
-        except Exception as error:
-            log_exception(
-                "sqs_record_processing_failed",
+            log_json(
+                "INFO",
+                "broadcaster_invoked",
                 aws_request_id=aws_request_id,
-                message_id=message_id,
-                error_type=type(error).__name__,
-                error_message=str(error),
+                sqs_record_count=len(records),
             )
 
-            if message_id:
-                batch_item_failures.append(
-                    {
-                        "itemIdentifier": message_id,
-                    }
-                )
+            for record in records:
+                message_id = record.get("messageId")
 
-    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-    log_json(
-        "INFO",
-        "broadcaster_batch_processed",
-        aws_request_id=aws_request_id,
-        input_records=len(records),
-        failed_records=len(batch_item_failures),
-        successful_records=len(records) - len(batch_item_failures),
-        duration_ms=duration_ms,
-    )
+                try:
+                    process_sqs_record(record, aws_request_id=aws_request_id)
 
-    return {
-        "batchItemFailures": batch_item_failures,
-    }
+                except Exception as error:
+                    span.record_exception(error)
+
+                    log_exception(
+                        "sqs_record_processing_failed",
+                        aws_request_id=aws_request_id,
+                        message_id=message_id,
+                        error_type=type(error).__name__,
+                        error_message=str(error),
+                    )
+
+                    if message_id:
+                        batch_item_failures.append(
+                            {
+                                "itemIdentifier": message_id,
+                            }
+                        )
+
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            successful_records = len(records) - len(batch_item_failures)
+
+            log_json(
+                "INFO",
+                "broadcaster_batch_processed",
+                aws_request_id=aws_request_id,
+                input_records=len(records),
+                failed_records=len(batch_item_failures),
+                successful_records=successful_records,
+                duration_ms=duration_ms,
+            )
+
+            span.set_attribute("sqs.failed_records", len(batch_item_failures))
+            span.set_attribute("sqs.successful_records", successful_records)
+            span.set_attribute("lambda.duration_ms", duration_ms)
+
+            if batch_item_failures:
+                span.set_attribute("lambda.result", "partial_failure")
+                span.set_status(Status(StatusCode.ERROR, "Some SQS records failed"))
+            else:
+                span.set_attribute("lambda.result", "success")
+                span.set_status(Status(StatusCode.OK))
+
+            return {
+                "batchItemFailures": batch_item_failures,
+            }
+
+    finally:
+        # Lambda executions are short-lived. Force flushing prevents metrics/traces
+        # from staying in memory until the runtime is frozen.
+        flush_otel()
