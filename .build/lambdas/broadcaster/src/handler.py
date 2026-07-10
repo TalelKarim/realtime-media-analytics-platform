@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -15,6 +16,7 @@ from botocore.exceptions import ClientError
 # ---------------------------------------------------------------------------
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+ENVIRONMENT = os.getenv("ENVIRONMENT", "dev")
 
 AGGREGATES_TABLE_NAME = os.environ["AGGREGATES_TABLE_NAME"]
 CONNECTIONS_TABLE_NAME = os.environ["CONNECTIONS_TABLE_NAME"]
@@ -154,6 +156,48 @@ def json_safe(value: Any) -> Any:
         return {key: json_safe(item) for key, item in value.items()}
 
     return value
+
+
+
+def log_json(level: str, message: str, **fields: Any) -> None:
+    """
+    Emit one structured JSON log line.
+
+    The log is intentionally written as JSON in the message body so CloudWatch
+    Logs Insights, Grafana Loki, and future OpenTelemetry pipelines can extract
+    fields consistently.
+    """
+    payload = {
+        "message": message,
+        "service": "broadcaster",
+        "component": "websocket-broadcast",
+        "environment": ENVIRONMENT,
+        **fields,
+    }
+
+    log_line = json.dumps(json_safe(payload), default=str)
+
+    if level.upper() == "ERROR":
+        logger.error(log_line)
+    elif level.upper() == "WARNING":
+        logger.warning(log_line)
+    else:
+        logger.info(log_line)
+
+
+def log_exception(message: str, **fields: Any) -> None:
+    """
+    Emit a structured JSON error log and keep the Python stack trace.
+    """
+    payload = {
+        "message": message,
+        "service": "broadcaster",
+        "component": "websocket-broadcast",
+        "environment": ENVIRONMENT,
+        **fields,
+    }
+
+    logger.exception(json.dumps(json_safe(payload), default=str))
 
 
 def get_event_count(item: Optional[Dict[str, Any]]) -> int:
@@ -401,9 +445,10 @@ def scan_connections() -> List[Dict[str, Any]]:
             ttl = item.get("ttl")
 
             if ttl is not None and to_int(ttl) < now_epoch:
-                logger.info(
-                    "Skipping expired connection",
-                    extra={"connection_id": item.get("connection_id")},
+                log_json(
+                    "INFO",
+                    "expired_connection_skipped",
+                    connection_id=item.get("connection_id"),
                 )
                 continue
 
@@ -564,7 +609,12 @@ def delete_connection(connection_id: str) -> None:
     )
 
 
-def post_to_connection(connection_id: str, message: Dict[str, Any]) -> str:
+def post_to_connection(
+    connection_id: str,
+    message: Dict[str, Any],
+    aws_request_id: Optional[str] = None,
+    topic: Optional[str] = None,
+) -> str:
     payload = json.dumps(json_safe(message), separators=(",", ":")).encode("utf-8")
 
     try:
@@ -576,19 +626,23 @@ def post_to_connection(connection_id: str, message: Dict[str, Any]) -> str:
 
     except ClientError as error:
         if is_gone_exception(error):
-            logger.info(
-                "Deleting stale WebSocket connection",
-                extra={"connection_id": connection_id},
+            log_json(
+                "INFO",
+                "gone_connection_cleaned",
+                aws_request_id=aws_request_id,
+                connection_id=connection_id,
+                topic=topic,
             )
             delete_connection(connection_id)
             return "gone"
 
-        logger.exception(
-            "Failed to post WebSocket message",
-            extra={
-                "connection_id": connection_id,
-                "error": str(error),
-            },
+        log_exception(
+            "websocket_post_failed",
+            aws_request_id=aws_request_id,
+            connection_id=connection_id,
+            topic=topic,
+            error_type=type(error).__name__,
+            error_message=str(error),
         )
         return "error"
 
@@ -596,6 +650,8 @@ def post_to_connection(connection_id: str, message: Dict[str, Any]) -> str:
 def send_message_to_connections(
     connections: List[Dict[str, Any]],
     message: Dict[str, Any],
+    aws_request_id: Optional[str] = None,
+    topic: Optional[str] = None,
 ) -> Dict[str, int]:
     sent = 0
     gone = 0
@@ -607,7 +663,12 @@ def send_message_to_connections(
         if not connection_id:
             continue
 
-        result = post_to_connection(connection_id, message)
+        result = post_to_connection(
+            connection_id=connection_id,
+            message=message,
+            aws_request_id=aws_request_id,
+            topic=topic or str(message.get("topic", "unknown")),
+        )
 
         if result == "sent":
             sent += 1
@@ -627,23 +688,37 @@ def send_message_to_connections(
 # Main processing
 # ---------------------------------------------------------------------------
 
-def parse_sqs_body(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def parse_sqs_body(
+    record: Dict[str, Any],
+    aws_request_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     body = record.get("body")
 
     if not body:
-        logger.warning("Skipping SQS record without body")
+        log_json(
+            "WARNING",
+            "sqs_record_skipped",
+            aws_request_id=aws_request_id,
+            reason="missing_body",
+        )
         return None
 
     try:
         message = json.loads(body)
     except json.JSONDecodeError:
-        logger.exception("Skipping SQS record with invalid JSON body")
+        log_exception(
+            "sqs_record_invalid_json",
+            aws_request_id=aws_request_id,
+        )
         return None
 
     if message.get("message_type") != "aggregates.updated":
-        logger.warning(
-            "Skipping unsupported SQS message_type",
-            extra={"message_type": message.get("message_type")},
+        log_json(
+            "WARNING",
+            "sqs_record_skipped",
+            aws_request_id=aws_request_id,
+            reason="unsupported_message_type",
+            message_type=message.get("message_type"),
         )
         return None
 
@@ -651,11 +726,21 @@ def parse_sqs_body(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     broadcast_window = message.get("broadcast_window")
 
     if not isinstance(aggregation_windows, list) or not aggregation_windows:
-        logger.warning("Skipping SQS message without aggregation_windows")
+        log_json(
+            "WARNING",
+            "sqs_record_skipped",
+            aws_request_id=aws_request_id,
+            reason="missing_aggregation_windows",
+        )
         return None
 
     if not broadcast_window:
-        logger.warning("Skipping SQS message without broadcast_window")
+        log_json(
+            "WARNING",
+            "sqs_record_skipped",
+            aws_request_id=aws_request_id,
+            reason="missing_broadcast_window",
+        )
         return None
 
     return message
@@ -686,7 +771,9 @@ def process_aggregation_window(
     aggregation_window: str,
     broadcast_window: str,
     connections: List[Dict[str, Any]],
+    aws_request_id: Optional[str] = None,
 ) -> Dict[str, int]:
+    start_time = time.perf_counter()
     window_key = normalize_window_key(aggregation_window)
 
     (
@@ -705,12 +792,16 @@ def process_aggregation_window(
 
     # Nothing to send.
     if not global_connections and not wiki_connections and not top_pages_connections:
-        logger.info(
-            "No matching WebSocket subscriptions found",
-            extra={
-                "aggregation_window": aggregation_window,
-                "broadcast_window": broadcast_window,
-            },
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        log_json(
+            "INFO",
+            "broadcast_skipped",
+            aws_request_id=aws_request_id,
+            reason="no_matching_subscriptions",
+            aggregation_window=aggregation_window,
+            broadcast_window=broadcast_window,
+            duration_ms=duration_ms,
+            **metrics,
         )
         return metrics
 
@@ -743,7 +834,12 @@ def process_aggregation_window(
             top_pages=top_pages,
         )
 
-        result = send_message_to_connections(global_connections, global_message)
+        result = send_message_to_connections(
+            global_connections,
+            global_message,
+            aws_request_id=aws_request_id,
+            topic="global",
+        )
         metrics["messages_sent"] += result["sent"]
         metrics["gone_connections"] += result["gone"]
         metrics["post_errors"] += result["errors"]
@@ -778,7 +874,12 @@ def process_aggregation_window(
             top_pages=wiki_top_pages,
         )
 
-        result = send_message_to_connections(subscribers, wiki_message)
+        result = send_message_to_connections(
+            subscribers,
+            wiki_message,
+            aws_request_id=aws_request_id,
+            topic=topic,
+        )
         metrics["messages_sent"] += result["sent"]
         metrics["gone_connections"] += result["gone"]
         metrics["post_errors"] += result["errors"]
@@ -791,25 +892,32 @@ def process_aggregation_window(
             top_pages=top_pages,
         )
 
-        result = send_message_to_connections(top_pages_connections, top_pages_message)
+        result = send_message_to_connections(
+            top_pages_connections,
+            top_pages_message,
+            aws_request_id=aws_request_id,
+            topic="top_pages",
+        )
         metrics["messages_sent"] += result["sent"]
         metrics["gone_connections"] += result["gone"]
         metrics["post_errors"] += result["errors"]
 
-    logger.info(
-        "Broadcast completed",
-        extra={
-            "aggregation_window": aggregation_window,
-            "broadcast_window": broadcast_window,
-            **metrics,
-        },
+    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+    log_json(
+        "INFO",
+        "broadcast_completed",
+        aws_request_id=aws_request_id,
+        aggregation_window=aggregation_window,
+        broadcast_window=broadcast_window,
+        duration_ms=duration_ms,
+        **metrics,
     )
 
     return metrics
 
 
-def process_sqs_record(record: Dict[str, Any]) -> None:
-    message = parse_sqs_body(record)
+def process_sqs_record(record: Dict[str, Any], aws_request_id: Optional[str] = None) -> None:
+    message = parse_sqs_body(record, aws_request_id=aws_request_id)
 
     # Malformed messages are skipped, not retried forever.
     if message is None:
@@ -820,13 +928,14 @@ def process_sqs_record(record: Dict[str, Any]) -> None:
 
     connections = scan_connections()
 
-    logger.info(
-        "Processing broadcast signal",
-        extra={
-            "broadcast_window": broadcast_window,
-            "aggregation_windows": aggregation_windows,
-            "connections_scanned": len(connections),
-        },
+    log_json(
+        "INFO",
+        "broadcast_signal_received",
+        aws_request_id=aws_request_id,
+        broadcast_window=broadcast_window,
+        aggregation_windows=aggregation_windows,
+        aggregation_window_count=len(aggregation_windows),
+        connections_scanned=len(connections),
     )
 
     for aggregation_window in aggregation_windows:
@@ -834,6 +943,7 @@ def process_sqs_record(record: Dict[str, Any]) -> None:
             aggregation_window=str(aggregation_window),
             broadcast_window=str(broadcast_window),
             connections=connections,
+            aws_request_id=aws_request_id,
         )
 
 
@@ -847,20 +957,29 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     We still support multiple records defensively.
     """
+    start_time = time.perf_counter()
+    aws_request_id = getattr(context, "aws_request_id", None)
     batch_item_failures = []
 
     records = event.get("Records", [])
+    log_json(
+        "INFO",
+        "broadcaster_invoked",
+        aws_request_id=aws_request_id,
+        sqs_record_count=len(records),
+    )
 
     for record in records:
         message_id = record.get("messageId")
 
         try:
-            process_sqs_record(record)
+            process_sqs_record(record, aws_request_id=aws_request_id)
 
         except Exception:
-            logger.exception(
-                "Failed to process SQS record",
-                extra={"message_id": message_id},
+            log_exception(
+                "sqs_record_processing_failed",
+                aws_request_id=aws_request_id,
+                message_id=message_id,
             )
 
             if message_id:

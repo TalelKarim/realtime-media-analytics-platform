@@ -11,6 +11,7 @@ import boto3
 
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+ENVIRONMENT = os.getenv("ENVIRONMENT", "dev")
 
 AGGREGATES_TABLE_NAME = os.getenv("AGGREGATES_TABLE_NAME")
 BROADCAST_QUEUE_URL = os.getenv("BROADCAST_QUEUE_URL")
@@ -30,6 +31,48 @@ sqs = boto3.client("sqs")
 table = dynamodb.Table(AGGREGATES_TABLE_NAME) if AGGREGATES_TABLE_NAME else None
 
 
+
+def log_json(level: str, message: str, **fields: Any) -> None:
+    """
+    Emit one structured JSON log line.
+
+    The log is intentionally written as JSON in the message body so CloudWatch
+    Logs Insights, Grafana Loki, and future OpenTelemetry pipelines can extract
+    fields consistently.
+    """
+    payload = {
+        "message": message,
+        "service": "realtime-processor",
+        "component": "realtime-processing",
+        "environment": ENVIRONMENT,
+        **fields,
+    }
+
+    log_line = json.dumps(payload, default=str)
+
+    if level.upper() == "ERROR":
+        logger.error(log_line)
+    elif level.upper() == "WARNING":
+        logger.warning(log_line)
+    else:
+        logger.info(log_line)
+
+
+def log_exception(message: str, **fields: Any) -> None:
+    """
+    Emit a structured JSON error log and keep the Python stack trace.
+    """
+    payload = {
+        "message": message,
+        "service": "realtime-processor",
+        "component": "realtime-processing",
+        "environment": ENVIRONMENT,
+        **fields,
+    }
+
+    logger.exception(json.dumps(payload, default=str))
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -45,10 +88,11 @@ def _parse_iso_datetime(value: str | None) -> datetime:
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception:
-        logger.warning(json.dumps({
-            "message": "invalid_occurred_at_fallback_to_now",
-            "occurred_at": value,
-        }))
+        log_json(
+            "WARNING",
+            "invalid_occurred_at_fallback_to_now",
+            occurred_at=value,
+        )
         return _utc_now()
 
 
@@ -407,19 +451,27 @@ def _update_counter(
     )
 
 
-def _send_broadcast_signal(aggregation_windows: set[str], now: datetime) -> bool:
+def _send_broadcast_signal(
+    aggregation_windows: set[str],
+    now: datetime,
+    aws_request_id: str | None = None,
+) -> bool:
     if not BROADCAST_QUEUE_URL:
-        logger.info(json.dumps({
-            "message": "broadcast_signal_skipped",
-            "reason": "missing_broadcast_queue_url",
-        }))
+        log_json(
+            "WARNING",
+            "broadcast_signal_skipped",
+            aws_request_id=aws_request_id,
+            reason="missing_broadcast_queue_url",
+        )
         return False
 
     if not aggregation_windows:
-        logger.info(json.dumps({
-            "message": "broadcast_signal_skipped",
-            "reason": "no_aggregation_windows",
-        }))
+        log_json(
+            "INFO",
+            "broadcast_signal_skipped",
+            aws_request_id=aws_request_id,
+            reason="no_aggregation_windows",
+        )
         return False
 
     broadcast_window_start = _floor_time(now, BROADCAST_WINDOW_SECONDS)
@@ -443,12 +495,15 @@ def _send_broadcast_signal(aggregation_windows: set[str], now: datetime) -> bool
             MessageDeduplicationId=deduplication_id,
         )
 
-        logger.info(json.dumps({
-            "message": "broadcast_signal_sent",
-            "broadcast_window": broadcast_window_iso,
-            "aggregation_windows": sorted(aggregation_windows),
-            "deduplication_id": deduplication_id,
-        }))
+        log_json(
+            "INFO",
+            "broadcast_signal_sent",
+            aws_request_id=aws_request_id,
+            broadcast_window=broadcast_window_iso,
+            aggregation_windows=sorted(aggregation_windows),
+            aggregation_window_count=len(aggregation_windows),
+            deduplication_id=deduplication_id,
+        )
 
         return True
 
@@ -456,14 +511,19 @@ def _send_broadcast_signal(aggregation_windows: set[str], now: datetime) -> bool
         # Important:
         # We do NOT fail the Lambda after DynamoDB writes succeeded.
         # Otherwise Kinesis would retry the batch and could double-count DynamoDB counters.
-        logger.exception(json.dumps({
-            "message": "broadcast_signal_failed",
-            "error": str(exc),
-        }))
+        log_exception(
+            "broadcast_signal_failed",
+            aws_request_id=aws_request_id,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
         return False
 
 
 def lambda_handler(event, context):
+    start_time = time.perf_counter()
+    aws_request_id = getattr(context, "aws_request_id", None)
+
     if not AGGREGATES_TABLE_NAME:
         raise RuntimeError("Missing required env var: AGGREGATES_TABLE_NAME")
 
@@ -475,12 +535,13 @@ def lambda_handler(event, context):
     now_iso = _to_iso_z(now)
     ttl = int(time.time()) + (AGGREGATE_TTL_DAYS * 86400)
 
-    logger.info(json.dumps({
-        "message": "realtime_processor_invoked",
-        "record_count": len(records),
-        "table": AGGREGATES_TABLE_NAME,
-        "aws_request_id": getattr(context, "aws_request_id", None),
-    }))
+    log_json(
+        "INFO",
+        "realtime_processor_invoked",
+        aws_request_id=aws_request_id,
+        record_count=len(records),
+        table=AGGREGATES_TABLE_NAME,
+    )
 
     decoded_count = 0
     valid_count = 0
@@ -503,10 +564,12 @@ def lambda_handler(event, context):
 
         except Exception as exc:
             skipped_count += 1
-            logger.exception(json.dumps({
-                "message": "record_processing_failed",
-                "error": str(exc),
-            }))
+            log_exception(
+                "record_processing_failed",
+                aws_request_id=aws_request_id,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
 
     counters, aggregation_windows = _build_counters(normalized_events)
 
@@ -525,22 +588,32 @@ def lambda_handler(event, context):
 
     broadcast_signal_sent = False
     if valid_count > 0 and dynamodb_update_count > 0:
-        broadcast_signal_sent = _send_broadcast_signal(aggregation_windows, now)
+        broadcast_signal_sent = _send_broadcast_signal(
+            aggregation_windows=aggregation_windows,
+            now=now,
+            aws_request_id=aws_request_id,
+        )
 
-    logger.info(json.dumps({
-        "message": "realtime_processor_batch_processed",
-        "input_records": len(records),
-        "decoded_count": decoded_count,
-        "valid_count": valid_count,
-        "skipped_count": skipped_count,
-        "aggregation_windows": sorted(aggregation_windows),
-        "dynamodb_update_count": dynamodb_update_count,
-        "broadcast_signal_sent": broadcast_signal_sent,
-        "finops_write_reduction": {
+    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+    log_json(
+        "INFO",
+        "realtime_processor_batch_processed",
+        aws_request_id=aws_request_id,
+        input_records=len(records),
+        decoded_count=decoded_count,
+        valid_count=valid_count,
+        skipped_count=skipped_count,
+        aggregation_windows=sorted(aggregation_windows),
+        aggregation_window_count=len(aggregation_windows),
+        dynamodb_update_count=dynamodb_update_count,
+        broadcast_signal_sent=broadcast_signal_sent,
+        duration_ms=duration_ms,
+        finops_write_reduction={
             "events": valid_count,
             "dynamodb_updates": dynamodb_update_count,
         },
-    }))
+    )
 
     return {
         "statusCode": 200,
