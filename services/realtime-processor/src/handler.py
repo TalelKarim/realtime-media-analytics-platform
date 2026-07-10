@@ -624,3 +624,5 @@ def lambda_handler(event, context):
         "dynamodb_update_count": dynamodb_update_count,
         "broadcast_signal_sent": broadcast_signal_sent,
     }
+
+

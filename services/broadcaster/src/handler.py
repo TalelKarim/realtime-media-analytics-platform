@@ -158,7 +158,6 @@ def json_safe(value: Any) -> Any:
     return value
 
 
-
 def log_json(level: str, message: str, **fields: Any) -> None:
     """
     Emit one structured JSON log line.
@@ -569,6 +568,7 @@ def build_wiki_message(
         },
     }
 
+
 def build_top_pages_message(
     aggregation_window: str,
     broadcast_window: str,
@@ -636,6 +636,8 @@ def post_to_connection(
             delete_connection(connection_id)
             return "gone"
 
+        # Existing behavior preserved for API Gateway ClientError cases:
+        # log the failed post, count it as a post error, but do not retry the whole SQS message.
         log_exception(
             "websocket_post_failed",
             aws_request_id=aws_request_id,
@@ -645,6 +647,21 @@ def post_to_connection(
             error_message=str(error),
         )
         return "error"
+
+    except Exception as error:
+        # Network/DNS/endpoint-level failures are not ClientError.
+        # Example: broken WEBSOCKET_ENDPOINT_URL -> EndpointConnectionError / urllib3 socket error.
+        # This is a platform/configuration failure, so we log it as websocket_post_failed
+        # and re-raise to force SQS retry via batchItemFailures.
+        log_exception(
+            "websocket_post_failed",
+            aws_request_id=aws_request_id,
+            connection_id=connection_id,
+            topic=topic,
+            error_type=type(error).__name__,
+            error_message=str(error),
+        )
+        raise
 
 
 def send_message_to_connections(
@@ -705,10 +722,12 @@ def parse_sqs_body(
 
     try:
         message = json.loads(body)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as error:
         log_exception(
             "sqs_record_invalid_json",
             aws_request_id=aws_request_id,
+            error_type=type(error).__name__,
+            error_message=str(error),
         )
         return None
 
@@ -975,11 +994,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         try:
             process_sqs_record(record, aws_request_id=aws_request_id)
 
-        except Exception:
+        except Exception as error:
             log_exception(
                 "sqs_record_processing_failed",
                 aws_request_id=aws_request_id,
                 message_id=message_id,
+                error_type=type(error).__name__,
+                error_message=str(error),
             )
 
             if message_id:
@@ -988,6 +1009,17 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                         "itemIdentifier": message_id,
                     }
                 )
+
+    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+    log_json(
+        "INFO",
+        "broadcaster_batch_processed",
+        aws_request_id=aws_request_id,
+        input_records=len(records),
+        failed_records=len(batch_item_failures),
+        successful_records=len(records) - len(batch_item_failures),
+        duration_ms=duration_ms,
+    )
 
     return {
         "batchItemFailures": batch_item_failures,
