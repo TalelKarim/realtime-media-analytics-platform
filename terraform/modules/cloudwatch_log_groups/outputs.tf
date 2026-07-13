@@ -1,12 +1,15 @@
 output "log_group_names" {
-  description = "Created CloudWatch log group names."
-  value       = [for lg in aws_cloudwatch_log_group.this : lg.name]
+  description = "CloudWatch log group names keyed by log group name."
+  value = {
+    for name, log_group in aws_cloudwatch_log_group.this :
+    name => log_group.name
+  }
 }
 
 output "log_group_arns" {
-  description = "Created CloudWatch log group ARNs."
+  description = "CloudWatch log group ARNs keyed by log group name."
   value = {
-    for name, lg in aws_cloudwatch_log_group.this :
-    name => lg.arn
+    for name, log_group in aws_cloudwatch_log_group.this :
+    name => log_group.arn
   }
 }
