@@ -1,3 +1,6 @@
+
+data "aws_region" "current" {}
+
 data "aws_lambda_function" "grafana_promtail" {
   function_name = "GrafanaCloudLambdaPromtail"
 }
