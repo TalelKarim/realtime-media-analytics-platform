@@ -29,6 +29,30 @@ module "realtime_processor_lambda" {
     BROADCAST_WINDOW_SECONDS    = "5"
     GLOBAL_ACTIVITY_SHARD_COUNT = "10"
     AGGREGATE_TTL_DAYS          = "2"
+
+
+    OTEL_ENABLED = "true"
+
+    OTEL_SERVICE_NAME = "realtime-media-analytics-${var.environment}-realtime-processor"
+
+    OTEL_RESOURCE_ATTRIBUTES = join(",", [
+      "service.namespace=realtime-media-analytics",
+      "deployment.environment=${var.environment}",
+      "cloud.provider=aws",
+      "cloud.region=${var.aws_region}"
+    ])
+
+    OTEL_EXPORTER_OTLP_ENDPOINT = var.grafana_otlp_endpoint
+    OTEL_EXPORTER_OTLP_HEADERS  = var.grafana_otlp_headers
+    OTEL_EXPORTER_OTLP_PROTOCOL = "http/protobuf"
+
+    OTEL_TRACES_EXPORTER  = "otlp"
+    OTEL_METRICS_EXPORTER = "otlp"
+    OTEL_LOGS_EXPORTER    = "none"
+
+    OTEL_EXPORTER_OTLP_TIMEOUT         = "3000"
+    OTEL_EXPORTER_OTLP_TRACES_TIMEOUT  = "3000"
+    OTEL_EXPORTER_OTLP_METRICS_TIMEOUT = "3000"
   }
 
   tags = local.tags

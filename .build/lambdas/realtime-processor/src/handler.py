@@ -8,6 +8,28 @@ from datetime import datetime, timezone
 from typing import Any
 
 import boto3
+from opentelemetry import trace as otel_trace
+from opentelemetry.propagate import inject
+from opentelemetry.trace import Status, StatusCode
+
+from .observability import (
+    broadcast_signal_duration_ms,
+    broadcast_signal_failure_total,
+    broadcast_signal_skipped_total,
+    broadcast_signals_sent_total,
+    dynamodb_aggregate_update_failure_total,
+    dynamodb_aggregate_updates_total,
+    dynamodb_update_batch_duration_ms,
+    flush_otel,
+    processor_batch_duration_ms,
+    realtime_processor_batches_total,
+    realtime_processor_records_decoded_total,
+    realtime_processor_records_failed_total,
+    realtime_processor_records_received_total,
+    realtime_processor_records_skipped_total,
+    realtime_processor_records_valid_total,
+    tracer,
+)
 
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -31,14 +53,17 @@ sqs = boto3.client("sqs")
 table = dynamodb.Table(AGGREGATES_TABLE_NAME) if AGGREGATES_TABLE_NAME else None
 
 
+# ---------------------------------------------------------------------------
+# Logging helpers
+# ---------------------------------------------------------------------------
 
 def log_json(level: str, message: str, **fields: Any) -> None:
     """
     Emit one structured JSON log line.
 
-    The log is intentionally written as JSON in the message body so CloudWatch
-    Logs Insights, Grafana Loki, and future OpenTelemetry pipelines can extract
-    fields consistently.
+    Logs still go through CloudWatch Logs -> Promtail -> Loki.
+    If an OpenTelemetry span is active, trace_id and span_id are added so Loki
+    logs can be correlated manually with Tempo traces.
     """
     payload = {
         "message": message,
@@ -47,6 +72,11 @@ def log_json(level: str, message: str, **fields: Any) -> None:
         "environment": ENVIRONMENT,
         **fields,
     }
+
+    span_context = otel_trace.get_current_span().get_span_context()
+    if span_context and span_context.is_valid:
+        payload["trace_id"] = format(span_context.trace_id, "032x")
+        payload["span_id"] = format(span_context.span_id, "016x")
 
     log_line = json.dumps(payload, default=str)
 
@@ -61,6 +91,9 @@ def log_json(level: str, message: str, **fields: Any) -> None:
 def log_exception(message: str, **fields: Any) -> None:
     """
     Emit a structured JSON error log and keep the Python stack trace.
+
+    If an OpenTelemetry span is active, trace_id and span_id are added so Grafana
+    can correlate Loki logs with Tempo traces.
     """
     payload = {
         "message": message,
@@ -70,8 +103,17 @@ def log_exception(message: str, **fields: Any) -> None:
         **fields,
     }
 
+    span_context = otel_trace.get_current_span().get_span_context()
+    if span_context and span_context.is_valid:
+        payload["trace_id"] = format(span_context.trace_id, "032x")
+        payload["span_id"] = format(span_context.span_id, "016x")
+
     logger.exception(json.dumps(payload, default=str))
 
+
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -193,6 +235,10 @@ def _add_counter(
     if attrs:
         counters[key]["attrs"].update(attrs)
 
+
+# ---------------------------------------------------------------------------
+# Event normalization and aggregation
+# ---------------------------------------------------------------------------
 
 def _extract_normalized_event(envelope: dict[str, Any]) -> dict[str, Any] | None:
     event_type = envelope.get("event_type")
@@ -398,6 +444,10 @@ def _build_counters(
     return counters, aggregation_windows
 
 
+# ---------------------------------------------------------------------------
+# DynamoDB update helpers
+# ---------------------------------------------------------------------------
+
 def _update_counter(
     metric_key: str,
     window_key: str,
@@ -451,176 +501,458 @@ def _update_counter(
     )
 
 
+# ---------------------------------------------------------------------------
+# SQS broadcast signal
+# ---------------------------------------------------------------------------
+
+def _otel_message_attributes_from_current_context() -> dict[str, dict[str, str]]:
+    """
+    Inject the current OpenTelemetry trace context into SQS message attributes.
+
+    The broadcaster does not consume this context yet. This is safe and prepares
+    the next step: end-to-end trace propagation realtime-processor -> SQS -> broadcaster.
+    """
+    carrier: dict[str, str] = {}
+    inject(carrier)
+
+    message_attributes: dict[str, dict[str, str]] = {}
+
+    for key in ("traceparent", "tracestate", "baggage"):
+        value = carrier.get(key)
+        if value:
+            message_attributes[key] = {
+                "DataType": "String",
+                "StringValue": value,
+            }
+
+    return message_attributes
+
+
 def _send_broadcast_signal(
     aggregation_windows: set[str],
     now: datetime,
     aws_request_id: str | None = None,
 ) -> bool:
-    if not BROADCAST_QUEUE_URL:
-        log_json(
-            "WARNING",
-            "broadcast_signal_skipped",
-            aws_request_id=aws_request_id,
-            reason="missing_broadcast_queue_url",
-        )
-        return False
-
-    if not aggregation_windows:
-        log_json(
-            "INFO",
-            "broadcast_signal_skipped",
-            aws_request_id=aws_request_id,
-            reason="no_aggregation_windows",
-        )
-        return False
-
-    broadcast_window_start = _floor_time(now, BROADCAST_WINDOW_SECONDS)
-    broadcast_window_iso = _to_iso_z(broadcast_window_start)
-
-    message_body = {
-        "message_type": "aggregates.updated",
-        "source": "realtime-processor",
-        "created_at": _to_iso_z(now),
-        "broadcast_window": broadcast_window_iso,
-        "aggregation_windows": sorted(aggregation_windows),
+    start_time = time.perf_counter()
+    metric_attrs = {
+        "environment": ENVIRONMENT,
     }
 
-    deduplication_id = f"BROADCAST#{broadcast_window_iso}"
+    with tracer.start_as_current_span("realtime_processor.send_broadcast_signal") as span:
+        span.set_attribute("messaging.system", "aws.sqs")
+        span.set_attribute("messaging.destination.name", "broadcast-signal")
+        span.set_attribute("broadcast.aggregation_window_count", len(aggregation_windows))
 
-    try:
-        sqs.send_message(
-            QueueUrl=BROADCAST_QUEUE_URL,
-            MessageBody=json.dumps(message_body),
-            MessageGroupId="realtime-broadcast",
-            MessageDeduplicationId=deduplication_id,
-        )
+        if not BROADCAST_QUEUE_URL:
+            broadcast_signal_skipped_total.add(
+                1,
+                {
+                    **metric_attrs,
+                    "reason": "missing_broadcast_queue_url",
+                },
+            )
 
-        log_json(
-            "INFO",
-            "broadcast_signal_sent",
-            aws_request_id=aws_request_id,
-            broadcast_window=broadcast_window_iso,
-            aggregation_windows=sorted(aggregation_windows),
-            aggregation_window_count=len(aggregation_windows),
-            deduplication_id=deduplication_id,
-        )
+            span.set_attribute("broadcast.signal.result", "skipped")
+            span.set_attribute("broadcast.signal.skip_reason", "missing_broadcast_queue_url")
+            span.set_status(Status(StatusCode.OK))
 
-        return True
+            log_json(
+                "WARNING",
+                "broadcast_signal_skipped",
+                aws_request_id=aws_request_id,
+                reason="missing_broadcast_queue_url",
+            )
+            return False
 
-    except Exception as exc:
-        # Important:
-        # We do NOT fail the Lambda after DynamoDB writes succeeded.
-        # Otherwise Kinesis would retry the batch and could double-count DynamoDB counters.
-        log_exception(
-            "broadcast_signal_failed",
-            aws_request_id=aws_request_id,
-            error_type=type(exc).__name__,
-            error_message=str(exc),
-        )
-        return False
+        if not aggregation_windows:
+            broadcast_signal_skipped_total.add(
+                1,
+                {
+                    **metric_attrs,
+                    "reason": "no_aggregation_windows",
+                },
+            )
 
+            span.set_attribute("broadcast.signal.result", "skipped")
+            span.set_attribute("broadcast.signal.skip_reason", "no_aggregation_windows")
+            span.set_status(Status(StatusCode.OK))
+
+            log_json(
+                "INFO",
+                "broadcast_signal_skipped",
+                aws_request_id=aws_request_id,
+                reason="no_aggregation_windows",
+            )
+            return False
+
+        broadcast_window_start = _floor_time(now, BROADCAST_WINDOW_SECONDS)
+        broadcast_window_iso = _to_iso_z(broadcast_window_start)
+
+        message_body = {
+            "message_type": "aggregates.updated",
+            "source": "realtime-processor",
+            "created_at": _to_iso_z(now),
+            "broadcast_window": broadcast_window_iso,
+            "aggregation_windows": sorted(aggregation_windows),
+        }
+
+        deduplication_id = f"BROADCAST#{broadcast_window_iso}"
+        message_attributes = _otel_message_attributes_from_current_context()
+
+        span.set_attribute("broadcast.broadcast_window", broadcast_window_iso)
+        span.set_attribute("messaging.message.conversation_id", deduplication_id)
+
+        try:
+            sqs.send_message(
+                QueueUrl=BROADCAST_QUEUE_URL,
+                MessageBody=json.dumps(message_body),
+                MessageGroupId="realtime-broadcast",
+                MessageDeduplicationId=deduplication_id,
+                MessageAttributes=message_attributes,
+            )
+
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+            broadcast_signals_sent_total.add(
+                1,
+                {
+                    **metric_attrs,
+                    "result": "sent",
+                },
+            )
+            broadcast_signal_duration_ms.record(
+                duration_ms,
+                {
+                    **metric_attrs,
+                    "result": "sent",
+                },
+            )
+
+            span.set_attribute("broadcast.signal.result", "sent")
+            span.set_attribute("broadcast.signal.duration_ms", duration_ms)
+            span.set_status(Status(StatusCode.OK))
+
+            log_json(
+                "INFO",
+                "broadcast_signal_sent",
+                aws_request_id=aws_request_id,
+                broadcast_window=broadcast_window_iso,
+                aggregation_windows=sorted(aggregation_windows),
+                aggregation_window_count=len(aggregation_windows),
+                deduplication_id=deduplication_id,
+                trace_context_injected=bool(message_attributes.get("traceparent")),
+            )
+
+            return True
+
+        except Exception as exc:
+            # Important:
+            # We do NOT fail the Lambda after DynamoDB writes succeeded.
+            # Otherwise Kinesis would retry the batch and could double-count DynamoDB counters.
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            failure_attrs = {
+                **metric_attrs,
+                "error_type": type(exc).__name__,
+            }
+
+            broadcast_signal_failure_total.add(1, failure_attrs)
+            broadcast_signal_duration_ms.record(
+                duration_ms,
+                {
+                    **failure_attrs,
+                    "result": "failed",
+                },
+            )
+
+            span.record_exception(exc)
+            span.set_attribute("broadcast.signal.result", "failed")
+            span.set_attribute("broadcast.signal.duration_ms", duration_ms)
+            span.set_attribute("error.type", type(exc).__name__)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+
+            log_exception(
+                "broadcast_signal_failed",
+                aws_request_id=aws_request_id,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            return False
+
+
+# ---------------------------------------------------------------------------
+# Lambda entrypoint
+# ---------------------------------------------------------------------------
 
 def lambda_handler(event, context):
     start_time = time.perf_counter()
     aws_request_id = getattr(context, "aws_request_id", None)
 
-    if not AGGREGATES_TABLE_NAME:
-        raise RuntimeError("Missing required env var: AGGREGATES_TABLE_NAME")
+    metric_base_attrs = {
+        "environment": ENVIRONMENT,
+    }
 
-    if table is None:
-        raise RuntimeError("DynamoDB table client is not initialized")
+    try:
+        with tracer.start_as_current_span("realtime_processor.lambda_handler") as span:
+            span.set_attribute("faas.trigger", "kinesis")
+            span.set_attribute("faas.execution", aws_request_id or "unknown")
 
-    records = event.get("Records", [])
-    now = _utc_now()
-    now_iso = _to_iso_z(now)
-    ttl = int(time.time()) + (AGGREGATE_TTL_DAYS * 86400)
+            if not AGGREGATES_TABLE_NAME:
+                raise RuntimeError("Missing required env var: AGGREGATES_TABLE_NAME")
 
-    log_json(
-        "INFO",
-        "realtime_processor_invoked",
-        aws_request_id=aws_request_id,
-        record_count=len(records),
-        table=AGGREGATES_TABLE_NAME,
-    )
+            if table is None:
+                raise RuntimeError("DynamoDB table client is not initialized")
 
-    decoded_count = 0
-    valid_count = 0
-    skipped_count = 0
+            records = event.get("Records", [])
+            now = _utc_now()
+            now_iso = _to_iso_z(now)
+            ttl = int(time.time()) + (AGGREGATE_TTL_DAYS * 86400)
 
-    normalized_events: list[dict[str, Any]] = []
+            span.set_attribute("kinesis.record_count", len(records))
+            realtime_processor_records_received_total.add(len(records), metric_base_attrs)
 
-    for record in records:
-        try:
-            envelope = _decode_kinesis_record(record)
-            decoded_count += 1
-
-            normalized_event = _extract_normalized_event(envelope)
-            if normalized_event is None:
-                skipped_count += 1
-                continue
-
-            valid_count += 1
-            normalized_events.append(normalized_event)
-
-        except Exception as exc:
-            skipped_count += 1
-            log_exception(
-                "record_processing_failed",
+            log_json(
+                "INFO",
+                "realtime_processor_invoked",
                 aws_request_id=aws_request_id,
-                error_type=type(exc).__name__,
-                error_message=str(exc),
+                record_count=len(records),
+                table=AGGREGATES_TABLE_NAME,
             )
 
-    counters, aggregation_windows = _build_counters(normalized_events)
+            decoded_count = 0
+            valid_count = 0
+            skipped_count = 0
+            failed_record_count = 0
 
-    dynamodb_update_count = 0
+            normalized_events: list[dict[str, Any]] = []
 
-    for (metric_key, window_key), counter_data in counters.items():
-        _update_counter(
-            metric_key=metric_key,
-            window_key=window_key,
-            count=counter_data["count"],
-            now_iso=now_iso,
-            ttl=ttl,
-            attrs=counter_data.get("attrs", {}),
+            with tracer.start_as_current_span("realtime_processor.decode_kinesis_batch") as decode_span:
+                decode_span.set_attribute("kinesis.record_count", len(records))
+
+                for record in records:
+                    try:
+                        envelope = _decode_kinesis_record(record)
+                        decoded_count += 1
+
+                        normalized_event = _extract_normalized_event(envelope)
+                        if normalized_event is None:
+                            skipped_count += 1
+                            continue
+
+                        valid_count += 1
+                        normalized_events.append(normalized_event)
+
+                    except Exception as exc:
+                        skipped_count += 1
+                        failed_record_count += 1
+
+                        failure_attrs = {
+                            **metric_base_attrs,
+                            "error_type": type(exc).__name__,
+                        }
+                        realtime_processor_records_failed_total.add(1, failure_attrs)
+
+                        decode_span.record_exception(exc)
+
+                        log_exception(
+                            "record_processing_failed",
+                            aws_request_id=aws_request_id,
+                            error_type=type(exc).__name__,
+                            error_message=str(exc),
+                        )
+
+                realtime_processor_records_decoded_total.add(decoded_count, metric_base_attrs)
+                realtime_processor_records_valid_total.add(valid_count, metric_base_attrs)
+                realtime_processor_records_skipped_total.add(skipped_count, metric_base_attrs)
+
+                decode_span.set_attribute("records.decoded_count", decoded_count)
+                decode_span.set_attribute("records.valid_count", valid_count)
+                decode_span.set_attribute("records.skipped_count", skipped_count)
+                decode_span.set_attribute("records.failed_count", failed_record_count)
+                decode_span.set_status(Status(StatusCode.OK))
+
+            with tracer.start_as_current_span("realtime_processor.build_counters") as counters_span:
+                counters, aggregation_windows = _build_counters(normalized_events)
+
+                counters_span.set_attribute("events.normalized_count", len(normalized_events))
+                counters_span.set_attribute("aggregation.window_count", len(aggregation_windows))
+                counters_span.set_attribute("dynamodb.counter_count", len(counters))
+                counters_span.set_status(Status(StatusCode.OK))
+
+            dynamodb_update_count = 0
+            update_start_time = time.perf_counter()
+
+            with tracer.start_as_current_span("realtime_processor.update_dynamodb_batch") as ddb_span:
+                ddb_span.set_attribute("dynamodb.table", AGGREGATES_TABLE_NAME)
+                ddb_span.set_attribute("dynamodb.counter_count", len(counters))
+
+                try:
+                    for (metric_key, window_key), counter_data in counters.items():
+                        try:
+                            _update_counter(
+                                metric_key=metric_key,
+                                window_key=window_key,
+                                count=counter_data["count"],
+                                now_iso=now_iso,
+                                ttl=ttl,
+                                attrs=counter_data.get("attrs", {}),
+                            )
+
+                            dynamodb_update_count += 1
+                            dynamodb_aggregate_updates_total.add(1, metric_base_attrs)
+
+                        except Exception as exc:
+                            failure_attrs = {
+                                **metric_base_attrs,
+                                "error_type": type(exc).__name__,
+                            }
+                            dynamodb_aggregate_update_failure_total.add(1, failure_attrs)
+
+                            ddb_span.record_exception(exc)
+                            ddb_span.set_attribute("dynamodb.failed_metric_key", metric_key)
+                            ddb_span.set_attribute("dynamodb.failed_window_key", window_key)
+                            ddb_span.set_attribute("error.type", type(exc).__name__)
+                            ddb_span.set_status(Status(StatusCode.ERROR, str(exc)))
+
+                            log_exception(
+                                "dynamodb_update_failed",
+                                aws_request_id=aws_request_id,
+                                metric_key=metric_key,
+                                window_key=window_key,
+                                error_type=type(exc).__name__,
+                                error_message=str(exc),
+                            )
+                            raise
+
+                    update_duration_ms = round((time.perf_counter() - update_start_time) * 1000, 2)
+
+                    dynamodb_update_batch_duration_ms.record(
+                        update_duration_ms,
+                        {
+                            **metric_base_attrs,
+                            "result": "completed",
+                        },
+                    )
+
+                    ddb_span.set_attribute("dynamodb.update_count", dynamodb_update_count)
+                    ddb_span.set_attribute("dynamodb.update_duration_ms", update_duration_ms)
+                    ddb_span.set_status(Status(StatusCode.OK))
+
+                except Exception:
+                    update_duration_ms = round((time.perf_counter() - update_start_time) * 1000, 2)
+                    dynamodb_update_batch_duration_ms.record(
+                        update_duration_ms,
+                        {
+                            **metric_base_attrs,
+                            "result": "failed",
+                        },
+                    )
+                    raise
+
+            broadcast_signal_sent = False
+            if valid_count > 0 and dynamodb_update_count > 0:
+                broadcast_signal_sent = _send_broadcast_signal(
+                    aggregation_windows=aggregation_windows,
+                    now=now,
+                    aws_request_id=aws_request_id,
+                )
+
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+            realtime_processor_batches_total.add(
+                1,
+                {
+                    **metric_base_attrs,
+                    "result": "success",
+                    "broadcast_signal_sent": str(broadcast_signal_sent).lower(),
+                },
+            )
+            processor_batch_duration_ms.record(
+                duration_ms,
+                {
+                    **metric_base_attrs,
+                    "result": "success",
+                },
+            )
+
+            span.set_attribute("records.input_count", len(records))
+            span.set_attribute("records.decoded_count", decoded_count)
+            span.set_attribute("records.valid_count", valid_count)
+            span.set_attribute("records.skipped_count", skipped_count)
+            span.set_attribute("dynamodb.update_count", dynamodb_update_count)
+            span.set_attribute("broadcast.signal_sent", broadcast_signal_sent)
+            span.set_attribute("lambda.duration_ms", duration_ms)
+            span.set_attribute("lambda.result", "success")
+            span.set_status(Status(StatusCode.OK))
+
+            log_json(
+                "INFO",
+                "realtime_processor_batch_processed",
+                aws_request_id=aws_request_id,
+                input_records=len(records),
+                decoded_count=decoded_count,
+                valid_count=valid_count,
+                skipped_count=skipped_count,
+                aggregation_windows=sorted(aggregation_windows),
+                aggregation_window_count=len(aggregation_windows),
+                dynamodb_update_count=dynamodb_update_count,
+                broadcast_signal_sent=broadcast_signal_sent,
+                duration_ms=duration_ms,
+                finops_write_reduction={
+                    "events": valid_count,
+                    "dynamodb_updates": dynamodb_update_count,
+                },
+            )
+
+            return {
+                "statusCode": 200,
+                "input_records": len(records),
+                "decoded_count": decoded_count,
+                "valid_count": valid_count,
+                "skipped_count": skipped_count,
+                "dynamodb_update_count": dynamodb_update_count,
+                "broadcast_signal_sent": broadcast_signal_sent,
+            }
+
+    except Exception as exc:
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+        realtime_processor_batches_total.add(
+            1,
+            {
+                **metric_base_attrs,
+                "result": "failed",
+                "error_type": type(exc).__name__,
+            },
         )
-        dynamodb_update_count += 1
+        processor_batch_duration_ms.record(
+            duration_ms,
+            {
+                **metric_base_attrs,
+                "result": "failed",
+                "error_type": type(exc).__name__,
+            },
+        )
 
-    broadcast_signal_sent = False
-    if valid_count > 0 and dynamodb_update_count > 0:
-        broadcast_signal_sent = _send_broadcast_signal(
-            aggregation_windows=aggregation_windows,
-            now=now,
+        current_span = otel_trace.get_current_span()
+        current_span.record_exception(exc)
+        current_span.set_attribute("lambda.result", "failed")
+        current_span.set_attribute("lambda.duration_ms", duration_ms)
+        current_span.set_attribute("error.type", type(exc).__name__)
+        current_span.set_status(Status(StatusCode.ERROR, str(exc)))
+
+        log_exception(
+            "realtime_processor_batch_failed",
             aws_request_id=aws_request_id,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            duration_ms=duration_ms,
         )
 
-    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        # Preserve the existing reliability behavior:
+        # if DynamoDB or critical processing fails, Kinesis should retry the batch.
+        raise
 
-    log_json(
-        "INFO",
-        "realtime_processor_batch_processed",
-        aws_request_id=aws_request_id,
-        input_records=len(records),
-        decoded_count=decoded_count,
-        valid_count=valid_count,
-        skipped_count=skipped_count,
-        aggregation_windows=sorted(aggregation_windows),
-        aggregation_window_count=len(aggregation_windows),
-        dynamodb_update_count=dynamodb_update_count,
-        broadcast_signal_sent=broadcast_signal_sent,
-        duration_ms=duration_ms,
-        finops_write_reduction={
-            "events": valid_count,
-            "dynamodb_updates": dynamodb_update_count,
-        },
-    )
-
-    return {
-        "statusCode": 200,
-        "input_records": len(records),
-        "decoded_count": decoded_count,
-        "valid_count": valid_count,
-        "skipped_count": skipped_count,
-        "dynamodb_update_count": dynamodb_update_count,
-        "broadcast_signal_sent": broadcast_signal_sent,
-    }
+    finally:
+        # Lambda executions are short-lived. Force flushing prevents metrics/traces
+        # from staying in memory until the runtime is frozen.
+        flush_otel()
