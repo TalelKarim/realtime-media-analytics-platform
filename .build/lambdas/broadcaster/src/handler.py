@@ -12,7 +12,9 @@ from botocore.exceptions import ClientError
 
 
 
-from opentelemetry import trace as otel_trace
+from opentelemetry import propagate, trace as otel_trace
+from opentelemetry.context import Context
+from opentelemetry.propagators.textmap import Getter
 from opentelemetry.trace import Status, StatusCode
 
 from .observability import (
@@ -84,6 +86,117 @@ apigw_management = boto3.client(
 # ---------------------------------------------------------------------------
 # Generic helpers
 # ---------------------------------------------------------------------------
+
+
+class SQSMessageAttributesGetter(Getter[Dict[str, Any]]):
+    """
+    OpenTelemetry textmap getter for AWS Lambda SQS event records.
+
+    The realtime-processor injects W3C trace context into SQS MessageAttributes:
+      - traceparent
+      - tracestate
+      - baggage
+
+    Lambda receives those attributes with the shape:
+      record["messageAttributes"]["traceparent"]["stringValue"]
+
+    This getter lets OpenTelemetry extract that context so the broadcaster spans
+    become children of the realtime-processor trace.
+    """
+
+    def get(self, carrier: Dict[str, Any], key: str) -> List[str]:
+        if not carrier:
+            return []
+
+        message_attributes = carrier.get("messageAttributes") or {}
+        if not isinstance(message_attributes, dict):
+            return []
+
+        attribute = message_attributes.get(key)
+        if not isinstance(attribute, dict):
+            return []
+
+        value = (
+            attribute.get("stringValue")
+            or attribute.get("StringValue")
+            or attribute.get("value")
+        )
+
+        if not value:
+            return []
+
+        return [str(value)]
+
+    def keys(self, carrier: Dict[str, Any]) -> List[str]:
+        if not carrier:
+            return []
+
+        message_attributes = carrier.get("messageAttributes") or {}
+        if not isinstance(message_attributes, dict):
+            return []
+
+        return list(message_attributes.keys())
+
+
+SQS_MESSAGE_ATTRIBUTES_GETTER = SQSMessageAttributesGetter()
+
+
+def get_sqs_message_attribute(record: Dict[str, Any], name: str) -> Optional[str]:
+    message_attributes = record.get("messageAttributes") or {}
+    if not isinstance(message_attributes, dict):
+        return None
+
+    attribute = message_attributes.get(name)
+    if not isinstance(attribute, dict):
+        return None
+
+    value = (
+        attribute.get("stringValue")
+        or attribute.get("StringValue")
+        or attribute.get("value")
+    )
+
+    return str(value) if value else None
+
+
+def has_trace_context(record: Dict[str, Any]) -> bool:
+    return bool(get_sqs_message_attribute(record, "traceparent"))
+
+
+def extract_trace_context_from_sqs_record(record: Dict[str, Any]) -> Optional[Context]:
+    """
+    Extract W3C trace context from SQS MessageAttributes.
+
+    Returns None when the record has no traceparent or extraction fails.
+    This keeps backward compatibility with old messages created before trace
+    propagation was added.
+    """
+    if not has_trace_context(record):
+        return None
+
+    try:
+        return propagate.extract(
+            carrier=record,
+            getter=SQS_MESSAGE_ATTRIBUTES_GETTER,
+        )
+    except Exception as error:
+        logger.warning("sqs_trace_context_extract_failed: %s", error)
+        return None
+
+
+def first_trace_context(records: List[Dict[str, Any]]) -> Tuple[Optional[Context], bool]:
+    """
+    The SQS event source mapping is configured with batch_size=1 in this project.
+    For that normal case, the Lambda root span can safely use the first record's
+    trace context as parent.
+
+    If no propagated trace context exists, the broadcaster starts a new trace.
+    """
+    if not records:
+        return None, False
+
+    parent_context = extract_trace_context_from_sqs_record(records[0])
+    return parent_context, parent_context is not None
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -1104,6 +1217,12 @@ def process_sqs_record(record: Dict[str, Any], aws_request_id: Optional[str] = N
         if message_id:
             span.set_attribute("messaging.message.id", str(message_id))
 
+        traceparent = get_sqs_message_attribute(record, "traceparent")
+        if traceparent:
+            span.set_attribute("otel.traceparent.received", True)
+        else:
+            span.set_attribute("otel.traceparent.received", False)
+
         message = parse_sqs_body(record, aws_request_id=aws_request_id)
 
         # Malformed messages are skipped, not retried forever.
@@ -1165,18 +1284,22 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     batch_item_failures = []
 
     records = event.get("Records", [])
+    parent_context, trace_context_extracted = first_trace_context(records)
+    span_kwargs = {"context": parent_context} if parent_context is not None else {}
 
     try:
-        with tracer.start_as_current_span("broadcaster.lambda_handler") as span:
+        with tracer.start_as_current_span("broadcaster.lambda_handler", **span_kwargs) as span:
             span.set_attribute("faas.trigger", "sqs")
             span.set_attribute("faas.execution", aws_request_id or "unknown")
             span.set_attribute("sqs.record_count", len(records))
+            span.set_attribute("otel.trace_context.extracted", trace_context_extracted)
 
             log_json(
                 "INFO",
                 "broadcaster_invoked",
                 aws_request_id=aws_request_id,
                 sqs_record_count=len(records),
+                trace_context_extracted=trace_context_extracted,
             )
 
             for record in records:
