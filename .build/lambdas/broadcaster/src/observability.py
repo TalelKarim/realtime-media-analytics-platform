@@ -142,6 +142,24 @@ websocket_post_duration_ms = meter.create_histogram(
     description="Duration of one postToConnection call.",
 )
 
+event_to_dashboard_latency_ms = meter.create_histogram(
+    name="event_to_dashboard_latency_ms",
+    unit="ms",
+    description=(
+        "Latency between the latest Wikimedia event timestamp included in a "
+        "dashboard update and a successful WebSocket postToConnection."
+    ),
+)
+
+oldest_event_to_dashboard_latency_ms = meter.create_histogram(
+    name="oldest_event_to_dashboard_latency_ms",
+    unit="ms",
+    description=(
+        "Diagnostic latency between the oldest Wikimedia event timestamp included "
+        "in a dashboard update and a successful WebSocket postToConnection."
+    ),
+)
+
 active_connections_scanned = meter.create_histogram(
     name="active_connections_scanned",
     unit="1",

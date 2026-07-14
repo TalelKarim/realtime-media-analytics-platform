@@ -22,7 +22,9 @@ from .observability import (
     broadcast_completed_total,
     broadcast_duration_ms,
     broadcast_failed_total,
+    event_to_dashboard_latency_ms,
     flush_otel,
+    oldest_event_to_dashboard_latency_ms,
     tracer,
     websocket_connection_gone_total,
     websocket_messages_sent_total,
@@ -269,6 +271,106 @@ def to_int(value: Any, default: int = 0) -> int:
             return default
 
     return default
+
+
+def epoch_ms_now() -> int:
+    return int(time.time() * 1000)
+
+
+def to_epoch_ms(value: Any) -> Optional[int]:
+    """
+    Convert an epoch-milliseconds-like value to int.
+
+    SQS JSON can contain int, float, string or Decimal-like values depending on
+    the producer and JSON parsing path. Invalid or non-positive values are ignored.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, Decimal):
+        timestamp_ms = int(value)
+    elif isinstance(value, bool):
+        return None
+    elif isinstance(value, int):
+        timestamp_ms = value
+    elif isinstance(value, float):
+        timestamp_ms = int(value)
+    elif isinstance(value, str):
+        try:
+            timestamp_ms = int(float(value.strip()))
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if timestamp_ms <= 0:
+        return None
+
+    return timestamp_ms
+
+
+def topic_type_from_topic(topic: str) -> str:
+    """
+    Keep the freshness metric low-cardinality.
+
+    The existing WebSocket counters already use the raw topic label. For the
+    freshness histogram we intentionally avoid labels like wiki:frwiki because
+    the number of wiki topics can grow.
+    """
+    if topic == "global":
+        return "global"
+
+    if topic == "top_pages":
+        return "top_pages"
+
+    if topic.startswith("wiki:"):
+        return "wiki"
+
+    return "unknown"
+
+
+def get_event_timestamp_bounds_for_window(
+    message: Dict[str, Any],
+    aggregation_window: str,
+) -> Dict[str, Optional[int]]:
+    """
+    Return oldest/latest source event timestamps for one aggregation window.
+
+    Preferred contract from realtime-processor:
+      event_timestamp_bounds_by_window[aggregation_window]
+
+    Backward-compatible fallback:
+      oldest_event_timestamp_ms / latest_event_timestamp_ms at message top-level
+    """
+    bounds_by_window = message.get("event_timestamp_bounds_by_window")
+
+    if isinstance(bounds_by_window, dict):
+        candidate_keys = [
+            aggregation_window,
+            strip_window_prefix(aggregation_window),
+            normalize_window_key(aggregation_window),
+        ]
+
+        for key in candidate_keys:
+            bounds = bounds_by_window.get(key)
+            if isinstance(bounds, dict):
+                return {
+                    "oldest_event_timestamp_ms": to_epoch_ms(
+                        bounds.get("oldest_event_timestamp_ms")
+                    ),
+                    "latest_event_timestamp_ms": to_epoch_ms(
+                        bounds.get("latest_event_timestamp_ms")
+                    ),
+                }
+
+    return {
+        "oldest_event_timestamp_ms": to_epoch_ms(
+            message.get("oldest_event_timestamp_ms")
+        ),
+        "latest_event_timestamp_ms": to_epoch_ms(
+            message.get("latest_event_timestamp_ms")
+        ),
+    }
 
 
 def json_safe(value: Any) -> Any:
@@ -653,6 +755,26 @@ def index_connections_by_topic(
 # WebSocket message builders
 # ---------------------------------------------------------------------------
 
+def add_freshness_fields(
+    message: Dict[str, Any],
+    latest_event_timestamp_ms: Optional[int],
+    oldest_event_timestamp_ms: Optional[int],
+) -> Dict[str, Any]:
+    """
+    Add event-time metadata to the WebSocket payload.
+
+    These fields are useful for the backend freshness metric and for a future
+    WebSocket canary/client-side freshness check.
+    """
+    if latest_event_timestamp_ms is not None:
+        message["latest_event_timestamp_ms"] = latest_event_timestamp_ms
+
+    if oldest_event_timestamp_ms is not None:
+        message["oldest_event_timestamp_ms"] = oldest_event_timestamp_ms
+
+    return message
+
+
 def build_global_message(
     aggregation_window: str,
     broadcast_window: str,
@@ -664,8 +786,10 @@ def build_global_message(
     change_types: Dict[str, int],
     namespace_distribution: Dict[str, int],
     top_pages: List[Dict[str, Any]],
+    latest_event_timestamp_ms: Optional[int] = None,
+    oldest_event_timestamp_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
-    return {
+    message = {
         "type": "stats.update",
         "topic": "global",
         "timestamp": now_iso(),
@@ -684,6 +808,12 @@ def build_global_message(
         },
     }
 
+    return add_freshness_fields(
+        message=message,
+        latest_event_timestamp_ms=latest_event_timestamp_ms,
+        oldest_event_timestamp_ms=oldest_event_timestamp_ms,
+    )
+
 
 def build_wiki_message(
     wiki: str,
@@ -696,8 +826,10 @@ def build_wiki_message(
     change_types: Dict[str, int],
     namespace_distribution: Dict[str, int],
     top_pages: List[Dict[str, Any]],
+    latest_event_timestamp_ms: Optional[int] = None,
+    oldest_event_timestamp_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
-    return {
+    message = {
         "type": "stats.update",
         "topic": f"wiki:{wiki}",
         "timestamp": now_iso(),
@@ -717,15 +849,23 @@ def build_wiki_message(
         },
     }
 
+    return add_freshness_fields(
+        message=message,
+        latest_event_timestamp_ms=latest_event_timestamp_ms,
+        oldest_event_timestamp_ms=oldest_event_timestamp_ms,
+    )
+
 
 def build_top_pages_message(
     aggregation_window: str,
     broadcast_window: str,
     top_pages: List[Dict[str, Any]],
+    latest_event_timestamp_ms: Optional[int] = None,
+    oldest_event_timestamp_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
     current_minute_events_so_far = sum(to_int(page.get("count"), 0) for page in top_pages)
 
-    return {
+    message = {
         "type": "stats.update",
         "topic": "top_pages",
         "timestamp": now_iso(),
@@ -737,6 +877,12 @@ def build_top_pages_message(
             "top_pages": top_pages,
         },
     }
+
+    return add_freshness_fields(
+        message=message,
+        latest_event_timestamp_ms=latest_event_timestamp_ms,
+        oldest_event_timestamp_ms=oldest_event_timestamp_ms,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -765,18 +911,45 @@ def post_to_connection(
     aws_request_id: Optional[str] = None,
     topic: Optional[str] = None,
 ) -> str:
-    payload = json.dumps(json_safe(message), separators=(",", ":")).encode("utf-8")
     normalized_topic = topic or str(message.get("topic", "unknown"))
     start_time = time.perf_counter()
 
+    # Existing metrics keep their current raw topic label to avoid breaking
+    # existing dashboards. The new freshness histogram uses a lower-cardinality
+    # topic_type label.
     metric_attrs = {
         "topic": normalized_topic,
     }
+
+    freshness_metric_attrs = {
+        "environment": ENVIRONMENT,
+        "topic_type": topic_type_from_topic(normalized_topic),
+    }
+
+    latest_event_timestamp_ms = to_epoch_ms(message.get("latest_event_timestamp_ms"))
+    oldest_event_timestamp_ms = to_epoch_ms(message.get("oldest_event_timestamp_ms"))
+
+    server_send_attempt_at_ms = epoch_ms_now()
+    outbound_message = dict(message)
+    outbound_message["server_send_attempt_at_ms"] = server_send_attempt_at_ms
+
+    payload = json.dumps(
+        json_safe(outbound_message),
+        separators=(",", ":"),
+    ).encode("utf-8")
 
     with tracer.start_as_current_span("broadcaster.post_to_connection") as span:
         span.set_attribute("messaging.destination.name", normalized_topic)
         span.set_attribute("aws.service", "apigatewaymanagementapi")
         span.set_attribute("rpc.method", "post_to_connection")
+        span.set_attribute("websocket.topic_type", freshness_metric_attrs["topic_type"])
+        span.set_attribute("websocket.server_send_attempt_at_ms", server_send_attempt_at_ms)
+
+        if latest_event_timestamp_ms is not None:
+            span.set_attribute("events.latest_event_timestamp_ms", latest_event_timestamp_ms)
+
+        if oldest_event_timestamp_ms is not None:
+            span.set_attribute("events.oldest_event_timestamp_ms", oldest_event_timestamp_ms)
 
         try:
             apigw_management.post_to_connection(
@@ -784,13 +957,49 @@ def post_to_connection(
                 Data=payload,
             )
 
+            server_post_success_at_ms = epoch_ms_now()
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
             websocket_post_success_total.add(1, metric_attrs)
             websocket_messages_sent_total.add(1, metric_attrs)
             websocket_post_duration_ms.record(duration_ms, metric_attrs)
 
+            if latest_event_timestamp_ms is not None:
+                latency_ms = server_post_success_at_ms - latest_event_timestamp_ms
+
+                if latency_ms >= 0:
+                    event_to_dashboard_latency_ms.record(
+                        latency_ms,
+                        freshness_metric_attrs,
+                    )
+                    span.set_attribute("freshness.event_to_dashboard_latency_ms", latency_ms)
+                else:
+                    span.set_attribute("freshness.negative_latency_detected", True)
+                    log_json(
+                        "WARNING",
+                        "freshness_negative_latency_skipped",
+                        aws_request_id=aws_request_id,
+                        topic=normalized_topic,
+                        latest_event_timestamp_ms=latest_event_timestamp_ms,
+                        server_post_success_at_ms=server_post_success_at_ms,
+                        latency_ms=latency_ms,
+                    )
+
+            if oldest_event_timestamp_ms is not None:
+                oldest_latency_ms = server_post_success_at_ms - oldest_event_timestamp_ms
+
+                if oldest_latency_ms >= 0:
+                    oldest_event_to_dashboard_latency_ms.record(
+                        oldest_latency_ms,
+                        freshness_metric_attrs,
+                    )
+                    span.set_attribute(
+                        "freshness.oldest_event_to_dashboard_latency_ms",
+                        oldest_latency_ms,
+                    )
+
             span.set_attribute("websocket.post.result", "sent")
+            span.set_attribute("websocket.server_post_success_at_ms", server_post_success_at_ms)
             span.set_status(Status(StatusCode.OK))
 
             return "sent"
@@ -990,6 +1199,7 @@ def process_aggregation_window(
     aggregation_window: str,
     broadcast_window: str,
     connections: List[Dict[str, Any]],
+    event_timestamp_bounds: Optional[Dict[str, Optional[int]]] = None,
     aws_request_id: Optional[str] = None,
 ) -> Dict[str, int]:
     start_time = time.perf_counter()
@@ -999,10 +1209,24 @@ def process_aggregation_window(
         "environment": ENVIRONMENT,
     }
 
+    event_timestamp_bounds = event_timestamp_bounds or {}
+    oldest_event_timestamp_ms = to_epoch_ms(
+        event_timestamp_bounds.get("oldest_event_timestamp_ms")
+    )
+    latest_event_timestamp_ms = to_epoch_ms(
+        event_timestamp_bounds.get("latest_event_timestamp_ms")
+    )
+
     with tracer.start_as_current_span("broadcaster.process_aggregation_window") as span:
         span.set_attribute("broadcast.aggregation_window", aggregation_window)
         span.set_attribute("broadcast.broadcast_window", broadcast_window)
         span.set_attribute("broadcast.connections_scanned", len(connections))
+
+        if latest_event_timestamp_ms is not None:
+            span.set_attribute("events.latest_event_timestamp_ms", latest_event_timestamp_ms)
+
+        if oldest_event_timestamp_ms is not None:
+            span.set_attribute("events.oldest_event_timestamp_ms", oldest_event_timestamp_ms)
 
         try:
             (
@@ -1047,6 +1271,8 @@ def process_aggregation_window(
                     reason="no_matching_subscriptions",
                     aggregation_window=aggregation_window,
                     broadcast_window=broadcast_window,
+                    latest_event_timestamp_ms=latest_event_timestamp_ms,
+                    oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                     duration_ms=duration_ms,
                     **metrics,
                 )
@@ -1079,6 +1305,8 @@ def process_aggregation_window(
                     change_types=change_types,
                     namespace_distribution=namespace_distribution,
                     top_pages=top_pages,
+                    latest_event_timestamp_ms=latest_event_timestamp_ms,
+                    oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                 )
 
                 result = send_message_to_connections(
@@ -1119,6 +1347,8 @@ def process_aggregation_window(
                     change_types=wiki_change_types,
                     namespace_distribution=wiki_namespace_distribution,
                     top_pages=wiki_top_pages,
+                    latest_event_timestamp_ms=latest_event_timestamp_ms,
+                    oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                 )
 
                 result = send_message_to_connections(
@@ -1137,6 +1367,8 @@ def process_aggregation_window(
                     aggregation_window=aggregation_window,
                     broadcast_window=broadcast_window,
                     top_pages=top_pages,
+                    latest_event_timestamp_ms=latest_event_timestamp_ms,
+                    oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                 )
 
                 result = send_message_to_connections(
@@ -1233,9 +1465,19 @@ def process_sqs_record(record: Dict[str, Any], aws_request_id: Optional[str] = N
 
         broadcast_window = message["broadcast_window"]
         aggregation_windows = message["aggregation_windows"]
+        bounds_by_window = message.get("event_timestamp_bounds_by_window")
+        timestamp_bounds_window_count = (
+            len(bounds_by_window)
+            if isinstance(bounds_by_window, dict)
+            else 0
+        )
 
         span.set_attribute("broadcast.broadcast_window", str(broadcast_window))
         span.set_attribute("broadcast.aggregation_window_count", len(aggregation_windows))
+        span.set_attribute(
+            "events.timestamp_bounds_window_count",
+            timestamp_bounds_window_count,
+        )
 
         connections = scan_connections()
 
@@ -1254,14 +1496,22 @@ def process_sqs_record(record: Dict[str, Any], aws_request_id: Optional[str] = N
             broadcast_window=broadcast_window,
             aggregation_windows=aggregation_windows,
             aggregation_window_count=len(aggregation_windows),
+            timestamp_bounds_window_count=timestamp_bounds_window_count,
             connections_scanned=len(connections),
         )
 
         for aggregation_window in aggregation_windows:
+            aggregation_window_text = str(aggregation_window)
+            event_timestamp_bounds = get_event_timestamp_bounds_for_window(
+                message=message,
+                aggregation_window=aggregation_window_text,
+            )
+
             process_aggregation_window(
-                aggregation_window=str(aggregation_window),
+                aggregation_window=aggregation_window_text,
                 broadcast_window=str(broadcast_window),
                 connections=connections,
+                event_timestamp_bounds=event_timestamp_bounds,
                 aws_request_id=aws_request_id,
             )
 
