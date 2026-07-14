@@ -30,7 +30,7 @@ collector_task_cpu               = 256
 collector_task_memory            = 512
 collector_sample_rate            = 0.05
 collector_batch_size             = 100
-collector_flush_interval_seconds = 3
+collector_flush_interval_seconds = 1
 collector_log_level              = "INFO"
 
 
