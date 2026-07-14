@@ -163,13 +163,11 @@ def _extract_source_event_timestamp_ms(
     occurred_dt: datetime,
 ) -> int:
     """
-    Return the event-time timestamp in epoch milliseconds.
+    Return the source event timestamp in epoch milliseconds.
 
-    The final freshness SLO needs the source event timestamp, not the time at
-    which the Lambda processes the record. The future/target collector contract
-    can provide source_event_timestamp_ms directly. The current contract already
-    provides occurred_at, so we fall back to occurred_dt when the epoch-ms field
-    is absent.
+    The current collector sets occurred_at from Wikimedia meta.dt.
+    If the collector later sends source_event_timestamp_ms explicitly, this
+    function will prefer that numeric value and fall back to occurred_at.
     """
     for candidate in (
         envelope.get("source_event_timestamp_ms"),
@@ -182,21 +180,6 @@ def _extract_source_event_timestamp_ms(
             return timestamp_ms
 
     return _datetime_to_epoch_ms(occurred_dt)
-
-
-def _compute_event_timestamp_bounds(
-    events: list[dict[str, Any]],
-) -> tuple[int | None, int | None]:
-    timestamps = [
-        event["source_event_timestamp_ms"]
-        for event in events
-        if event.get("source_event_timestamp_ms") is not None
-    ]
-
-    if not timestamps:
-        return None, None
-
-    return min(timestamps), max(timestamps)
 
 
 def _floor_time(dt: datetime, window_seconds: int) -> datetime:
@@ -511,6 +494,65 @@ def _build_counters(
     return counters, aggregation_windows
 
 
+def _compute_event_timestamp_bounds_by_window(
+    events: list[dict[str, Any]],
+) -> dict[str, dict[str, int]]:
+    """
+    Compute oldest/latest source event timestamps per aggregation window.
+
+    This avoids a subtle SLO bug: a single global latest timestamp for a Lambda
+    batch can belong to a newer aggregation window and make an older window look
+    artificially fresh. The broadcaster must use the timestamp bound matching the
+    aggregation window it is broadcasting.
+    """
+    bounds_by_window: dict[str, dict[str, int]] = {}
+
+    for event in events:
+        timestamp_ms = event.get("source_event_timestamp_ms")
+        if timestamp_ms is None:
+            timestamp_ms = _datetime_to_epoch_ms(event["occurred_dt"])
+
+        window_start = _floor_time(event["occurred_dt"], AGGREGATION_WINDOW_SECONDS)
+        window_start_iso = _to_iso_z(window_start)
+
+        if window_start_iso not in bounds_by_window:
+            bounds_by_window[window_start_iso] = {
+                "oldest_event_timestamp_ms": timestamp_ms,
+                "latest_event_timestamp_ms": timestamp_ms,
+            }
+            continue
+
+        current_bounds = bounds_by_window[window_start_iso]
+        current_bounds["oldest_event_timestamp_ms"] = min(
+            current_bounds["oldest_event_timestamp_ms"],
+            timestamp_ms,
+        )
+        current_bounds["latest_event_timestamp_ms"] = max(
+            current_bounds["latest_event_timestamp_ms"],
+            timestamp_ms,
+        )
+
+    return bounds_by_window
+
+
+def _compute_global_event_timestamp_bounds(
+    event_timestamp_bounds_by_window: dict[str, dict[str, int]],
+) -> tuple[int | None, int | None]:
+    if not event_timestamp_bounds_by_window:
+        return None, None
+
+    oldest_values = [
+        bounds["oldest_event_timestamp_ms"]
+        for bounds in event_timestamp_bounds_by_window.values()
+    ]
+    latest_values = [
+        bounds["latest_event_timestamp_ms"]
+        for bounds in event_timestamp_bounds_by_window.values()
+    ]
+
+    return min(oldest_values), max(latest_values)
+
+
 # ---------------------------------------------------------------------------
 # DynamoDB update helpers
 # ---------------------------------------------------------------------------
@@ -576,8 +618,8 @@ def _otel_message_attributes_from_current_context() -> dict[str, dict[str, str]]
     """
     Inject the current OpenTelemetry trace context into SQS message attributes.
 
-    The broadcaster does not consume this context yet. This is safe and prepares
-    the next step: end-to-end trace propagation realtime-processor -> SQS -> broadcaster.
+    The broadcaster extracts this context to connect realtime-processor and
+    broadcaster spans into one end-to-end trace.
     """
     carrier: dict[str, str] = {}
     inject(carrier)
@@ -597,9 +639,10 @@ def _otel_message_attributes_from_current_context() -> dict[str, dict[str, str]]
 
 def _send_broadcast_signal(
     aggregation_windows: set[str],
-    now: datetime,
-    latest_event_timestamp_ms: int | None,
+    event_timestamp_bounds_by_window: dict[str, dict[str, int]],
     oldest_event_timestamp_ms: int | None,
+    latest_event_timestamp_ms: int | None,
+    now: datetime,
     aws_request_id: str | None = None,
 ) -> bool:
     start_time = time.perf_counter()
@@ -611,12 +654,16 @@ def _send_broadcast_signal(
         span.set_attribute("messaging.system", "aws.sqs")
         span.set_attribute("messaging.destination.name", "broadcast-signal")
         span.set_attribute("broadcast.aggregation_window_count", len(aggregation_windows))
-
-        if latest_event_timestamp_ms is not None:
-            span.set_attribute("events.latest_event_timestamp_ms", latest_event_timestamp_ms)
+        span.set_attribute(
+            "events.timestamp_bounds_window_count",
+            len(event_timestamp_bounds_by_window),
+        )
 
         if oldest_event_timestamp_ms is not None:
             span.set_attribute("events.oldest_event_timestamp_ms", oldest_event_timestamp_ms)
+
+        if latest_event_timestamp_ms is not None:
+            span.set_attribute("events.latest_event_timestamp_ms", latest_event_timestamp_ms)
 
         if not BROADCAST_QUEUE_URL:
             broadcast_signal_skipped_total.add(
@@ -669,8 +716,11 @@ def _send_broadcast_signal(
             "created_at": _to_iso_z(now),
             "broadcast_window": broadcast_window_iso,
             "aggregation_windows": sorted(aggregation_windows),
-            "latest_event_timestamp_ms": latest_event_timestamp_ms,
+            "event_timestamp_bounds_by_window": event_timestamp_bounds_by_window,
+            # Global values are kept as a convenient fallback/logging shortcut.
+            # The broadcaster should prefer event_timestamp_bounds_by_window for SLO freshness.
             "oldest_event_timestamp_ms": oldest_event_timestamp_ms,
+            "latest_event_timestamp_ms": latest_event_timestamp_ms,
         }
 
         deduplication_id = f"BROADCAST#{broadcast_window_iso}"
@@ -716,8 +766,9 @@ def _send_broadcast_signal(
                 broadcast_window=broadcast_window_iso,
                 aggregation_windows=sorted(aggregation_windows),
                 aggregation_window_count=len(aggregation_windows),
-                latest_event_timestamp_ms=latest_event_timestamp_ms,
+                event_timestamp_bounds_by_window=event_timestamp_bounds_by_window,
                 oldest_event_timestamp_ms=oldest_event_timestamp_ms,
+                latest_event_timestamp_ms=latest_event_timestamp_ms,
                 deduplication_id=deduplication_id,
                 trace_context_injected=bool(message_attributes.get("traceparent")),
             )
@@ -851,24 +902,31 @@ def lambda_handler(event, context):
 
             with tracer.start_as_current_span("realtime_processor.build_counters") as counters_span:
                 counters, aggregation_windows = _build_counters(normalized_events)
-                oldest_event_timestamp_ms, latest_event_timestamp_ms = _compute_event_timestamp_bounds(
+                event_timestamp_bounds_by_window = _compute_event_timestamp_bounds_by_window(
                     normalized_events
+                )
+                oldest_event_timestamp_ms, latest_event_timestamp_ms = _compute_global_event_timestamp_bounds(
+                    event_timestamp_bounds_by_window
                 )
 
                 counters_span.set_attribute("events.normalized_count", len(normalized_events))
                 counters_span.set_attribute("aggregation.window_count", len(aggregation_windows))
                 counters_span.set_attribute("dynamodb.counter_count", len(counters))
-
-                if latest_event_timestamp_ms is not None:
-                    counters_span.set_attribute(
-                        "events.latest_event_timestamp_ms",
-                        latest_event_timestamp_ms,
-                    )
+                counters_span.set_attribute(
+                    "events.timestamp_bounds_window_count",
+                    len(event_timestamp_bounds_by_window),
+                )
 
                 if oldest_event_timestamp_ms is not None:
                     counters_span.set_attribute(
                         "events.oldest_event_timestamp_ms",
                         oldest_event_timestamp_ms,
+                    )
+
+                if latest_event_timestamp_ms is not None:
+                    counters_span.set_attribute(
+                        "events.latest_event_timestamp_ms",
+                        latest_event_timestamp_ms,
                     )
 
                 counters_span.set_status(Status(StatusCode.OK))
@@ -947,9 +1005,10 @@ def lambda_handler(event, context):
             if valid_count > 0 and dynamodb_update_count > 0:
                 broadcast_signal_sent = _send_broadcast_signal(
                     aggregation_windows=aggregation_windows,
-                    now=now,
-                    latest_event_timestamp_ms=latest_event_timestamp_ms,
+                    event_timestamp_bounds_by_window=event_timestamp_bounds_by_window,
                     oldest_event_timestamp_ms=oldest_event_timestamp_ms,
+                    latest_event_timestamp_ms=latest_event_timestamp_ms,
+                    now=now,
                     aws_request_id=aws_request_id,
                 )
 
@@ -977,12 +1036,16 @@ def lambda_handler(event, context):
             span.set_attribute("records.skipped_count", skipped_count)
             span.set_attribute("dynamodb.update_count", dynamodb_update_count)
             span.set_attribute("broadcast.signal_sent", broadcast_signal_sent)
-
-            if latest_event_timestamp_ms is not None:
-                span.set_attribute("events.latest_event_timestamp_ms", latest_event_timestamp_ms)
+            span.set_attribute(
+                "events.timestamp_bounds_window_count",
+                len(event_timestamp_bounds_by_window),
+            )
 
             if oldest_event_timestamp_ms is not None:
                 span.set_attribute("events.oldest_event_timestamp_ms", oldest_event_timestamp_ms)
+
+            if latest_event_timestamp_ms is not None:
+                span.set_attribute("events.latest_event_timestamp_ms", latest_event_timestamp_ms)
 
             span.set_attribute("lambda.duration_ms", duration_ms)
             span.set_attribute("lambda.result", "success")
@@ -998,8 +1061,9 @@ def lambda_handler(event, context):
                 skipped_count=skipped_count,
                 aggregation_windows=sorted(aggregation_windows),
                 aggregation_window_count=len(aggregation_windows),
-                latest_event_timestamp_ms=latest_event_timestamp_ms,
+                event_timestamp_bounds_by_window=event_timestamp_bounds_by_window,
                 oldest_event_timestamp_ms=oldest_event_timestamp_ms,
+                latest_event_timestamp_ms=latest_event_timestamp_ms,
                 dynamodb_update_count=dynamodb_update_count,
                 broadcast_signal_sent=broadcast_signal_sent,
                 duration_ms=duration_ms,
@@ -1017,8 +1081,10 @@ def lambda_handler(event, context):
                 "skipped_count": skipped_count,
                 "dynamodb_update_count": dynamodb_update_count,
                 "broadcast_signal_sent": broadcast_signal_sent,
-                "latest_event_timestamp_ms": latest_event_timestamp_ms,
+                "aggregation_windows": sorted(aggregation_windows),
+                "event_timestamp_bounds_by_window": event_timestamp_bounds_by_window,
                 "oldest_event_timestamp_ms": oldest_event_timestamp_ms,
+                "latest_event_timestamp_ms": latest_event_timestamp_ms,
             }
 
     except Exception as exc:
