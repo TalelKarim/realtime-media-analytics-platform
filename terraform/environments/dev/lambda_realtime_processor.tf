@@ -66,8 +66,8 @@ resource "aws_lambda_event_source_mapping" "realtime_processor_kinesis" {
   function_name     = module.realtime_processor_lambda.function_name
   starting_position = "LATEST"
 
-  batch_size                         = 100
-  maximum_batching_window_in_seconds = 5
+  batch_size                         = 20
+  maximum_batching_window_in_seconds = 1
 
   enabled = true
 }
