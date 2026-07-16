@@ -25,6 +25,9 @@ module "lambda_broadcaster" {
       "cloud.region=${var.aws_region}"
     ])
 
+
+    ENABLE_OTEL_FLUSH = "false"
+
     OTEL_EXPORTER_OTLP_ENDPOINT = var.grafana_otlp_endpoint
     OTEL_EXPORTER_OTLP_HEADERS  = var.grafana_otlp_headers
     OTEL_EXPORTER_OTLP_PROTOCOL = "http/protobuf"

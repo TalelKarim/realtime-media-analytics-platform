@@ -41,6 +41,13 @@ from .observability import (
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "dev")
 
+
+
+ENABLE_OTEL_FLUSH = (
+    os.getenv("ENABLE_OTEL_FLUSH", "true").lower() == "true"
+)
+
+
 AGGREGATES_TABLE_NAME = os.environ["AGGREGATES_TABLE_NAME"]
 CONNECTIONS_TABLE_NAME = os.environ["CONNECTIONS_TABLE_NAME"]
 WEBSOCKET_ENDPOINT_URL = os.environ["WEBSOCKET_ENDPOINT_URL"]
@@ -1606,25 +1613,33 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return {
                 "batchItemFailures": batch_item_failures,
             }
-
+            
     finally:
         flush_start = time.perf_counter()
+        flush_duration_ms = 0.0
 
-        flush_otel()
+        if ENABLE_OTEL_FLUSH:
+            flush_otel()
 
-        flush_duration_ms = round(
-            (time.perf_counter() - flush_start) * 1000,
-            2,
-        )
+            flush_duration_ms = round(
+                (time.perf_counter() - flush_start) * 1000,
+                2,
+            )
+
         total_duration_ms = round(
-            (time.perf_counter() - invocation_start) * 1000,
+            (time.perf_counter() - start_time) * 1000,
             2,
         )
 
         logger.info(
             json.dumps({
-                "message": "otel_flush_completed",
-                "aws_request_id": getattr(context, "aws_request_id", None),
+                "message": (
+                    "otel_flush_completed"
+                    if ENABLE_OTEL_FLUSH
+                    else "otel_flush_skipped"
+                ),
+                "aws_request_id": aws_request_id,
+                "otel_flush_enabled": ENABLE_OTEL_FLUSH,
                 "flush_duration_ms": flush_duration_ms,
                 "total_duration_ms": total_duration_ms,
             })
