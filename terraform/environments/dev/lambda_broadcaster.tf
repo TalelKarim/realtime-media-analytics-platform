@@ -26,7 +26,7 @@ module "lambda_broadcaster" {
     ])
 
 
-    ENABLE_OTEL_FLUSH = "false"
+    ENABLE_OTEL_FLUSH = "true"
 
     OTEL_EXPORTER_OTLP_ENDPOINT = var.grafana_otlp_endpoint
     OTEL_EXPORTER_OTLP_HEADERS  = var.grafana_otlp_headers
