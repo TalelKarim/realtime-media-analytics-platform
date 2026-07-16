@@ -1605,6 +1605,24 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             }
 
     finally:
-        # Lambda executions are short-lived. Force flushing prevents metrics/traces
-        # from staying in memory until the runtime is frozen.
+        flush_start = time.perf_counter()
+
         flush_otel()
+
+        flush_duration_ms = round(
+            (time.perf_counter() - flush_start) * 1000,
+            2,
+        )
+        total_duration_ms = round(
+            (time.perf_counter() - invocation_start) * 1000,
+            2,
+        )
+
+        logger.info(
+            json.dumps({
+                "message": "otel_flush_completed",
+                "aws_request_id": getattr(context, "aws_request_id", None),
+                "flush_duration_ms": flush_duration_ms,
+                "total_duration_ms": total_duration_ms,
+            })
+        )
