@@ -1537,6 +1537,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     parent_context, trace_context_extracted = first_trace_context(records)
     span_kwargs = {"context": parent_context} if parent_context is not None else {}
 
+
+    invocation_start = time.perf_counter()
+
     try:
         with tracer.start_as_current_span("broadcaster.lambda_handler", **span_kwargs) as span:
             span.set_attribute("faas.trigger", "sqs")
