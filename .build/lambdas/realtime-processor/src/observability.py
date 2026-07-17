@@ -1,5 +1,7 @@
 import logging
 import os
+import time
+from typing import Any, Dict
 
 from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
@@ -17,18 +19,46 @@ logger = logging.getLogger(__name__)
 _initialized = False
 
 
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    """Read a positive integer environment variable defensively."""
+    raw_value = os.getenv(name)
+
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        logger.warning("invalid_integer_environment_variable: %s=%r", name, raw_value)
+        return default
+
+    if value < minimum:
+        logger.warning(
+            "environment_variable_below_minimum: %s=%r minimum=%s",
+            name,
+            raw_value,
+            minimum,
+        )
+        return default
+
+    return value
+
+
 def setup_otel() -> None:
     """
     Configure OpenTelemetry metrics and traces for the realtime-processor Lambda.
 
-    Export configuration is read from standard OTEL_* environment variables:
-      - OTEL_EXPORTER_OTLP_ENDPOINT
-      - OTEL_EXPORTER_OTLP_HEADERS
-      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-      - OTEL_SERVICE_NAME
+    The Python SDK exports OTLP/HTTP to the endpoint configured through the
+    standard OTEL_* environment variables. In the target architecture this
+    endpoint is the OpenTelemetry Collector Lambda Extension listening locally:
 
-    The setup is defensive: observability must never break the business path.
-    If OTel setup fails, the Lambda continues and the OTel API falls back to no-op behavior.
+      http://127.0.0.1:4318
+
+    The Collector is responsible for batching, retrying, and exporting telemetry
+    to Grafana Cloud.
+
+    Observability must never break the business path. If setup fails, the Lambda
+    continues to run and the OpenTelemetry API falls back to no-op behavior.
     """
     global _initialized
 
@@ -62,15 +92,28 @@ def setup_otel() -> None:
         trace_provider.add_span_processor(
             BatchSpanProcessor(
                 OTLPSpanExporter(),
-                schedule_delay_millis=5000,
-                max_export_batch_size=128,
+                schedule_delay_millis=_env_int(
+                    "OTEL_BSP_SCHEDULE_DELAY_MS",
+                    5000,
+                ),
+                max_export_batch_size=_env_int(
+                    "OTEL_BSP_MAX_EXPORT_BATCH_SIZE",
+                    128,
+                ),
+                max_queue_size=_env_int(
+                    "OTEL_BSP_MAX_QUEUE_SIZE",
+                    2048,
+                ),
             )
         )
         trace.set_tracer_provider(trace_provider)
 
         metric_reader = PeriodicExportingMetricReader(
             OTLPMetricExporter(),
-            export_interval_millis=10000,
+            export_interval_millis=_env_int(
+                "OTEL_METRIC_EXPORT_INTERVAL_MS",
+                10000,
+            ),
         )
 
         meter_provider = MeterProvider(
@@ -79,9 +122,15 @@ def setup_otel() -> None:
         )
         metrics.set_meter_provider(meter_provider)
 
-        # boto3 uses botocore internally. This creates automatic spans for AWS SDK calls
-        # such as DynamoDB UpdateItem and SQS SendMessage.
+        # boto3 uses botocore internally. This creates automatic spans for AWS SDK
+        # calls such as DynamoDB UpdateItem and SQS SendMessage.
         BotocoreInstrumentor().instrument()
+
+        logger.info(
+            "otel_initialized: endpoint=%s protocol=%s",
+            os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "default"),
+            os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "default"),
+        )
 
     except Exception as error:
         logger.warning("otel_setup_failed: %s", error)
@@ -178,22 +227,86 @@ broadcast_signal_duration_ms = meter.create_histogram(
 )
 
 
-def flush_otel() -> None:
-    """
-    Flush telemetry before Lambda runtime freeze.
 
-    This is best-effort only. Export errors should not fail the Lambda handler.
-    """
-    try:
-        tracer_provider = trace.get_tracer_provider()
-        if hasattr(tracer_provider, "force_flush"):
-            tracer_provider.force_flush(timeout_millis=2000)
-    except Exception as error:
-        logger.warning("otel_trace_flush_failed: %s", error)
+def _force_flush_provider(
+    provider: Any,
+    timeout_millis: int,
+    signal_name: str,
+) -> Dict[str, Any]:
+    """Force-flush one provider and return measurement details."""
+    started_at = time.perf_counter()
+    attempted = hasattr(provider, "force_flush")
+    succeeded = False
+    error_message = None
+
+    if not attempted:
+        return {
+            "attempted": False,
+            "succeeded": False,
+            "duration_ms": 0.0,
+            "timeout_ms": timeout_millis,
+            "error": None,
+        }
 
     try:
-        meter_provider = metrics.get_meter_provider()
-        if hasattr(meter_provider, "force_flush"):
-            meter_provider.force_flush(timeout_millis=2000)
-    except Exception as error:
-        logger.warning("otel_metric_flush_failed: %s", error)
+        result = provider.force_flush(timeout_millis=timeout_millis)
+
+        # TracerProvider.force_flush returns a bool. Some MeterProvider versions
+        # return None when the operation completes successfully.
+        succeeded = result is not False
+    except Exception as error:  # pragma: no cover - defensive runtime path
+        error_message = str(error)
+        logger.warning("otel_%s_flush_failed: %s", signal_name, error)
+
+    duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+
+    return {
+        "attempted": attempted,
+        "succeeded": succeeded,
+        "duration_ms": duration_ms,
+        "timeout_ms": timeout_millis,
+        "error": error_message,
+    }
+
+
+def flush_otel() -> Dict[str, Any]:
+    """
+    Hand pending telemetry to the local Collector with a bounded time budget.
+
+    Metrics are flushed first because operational counters and latency
+    histograms are required for the realtime SLOs. Both operations target the
+    local Collector endpoint, not Grafana Cloud directly.
+
+    The Collector's batch + decouple processors perform the remote Grafana
+    Cloud export outside the application handler's critical path.
+    """
+    metric_timeout_ms = _env_int(
+        "OTEL_METRIC_FLUSH_TIMEOUT_MS",
+        250,
+    )
+    trace_timeout_ms = _env_int(
+        "OTEL_TRACE_FLUSH_TIMEOUT_MS",
+        150,
+    )
+
+    flush_started_at = time.perf_counter()
+
+    metric_result = _force_flush_provider(
+        provider=metrics.get_meter_provider(),
+        timeout_millis=metric_timeout_ms,
+        signal_name="metric",
+    )
+
+    trace_result = _force_flush_provider(
+        provider=trace.get_tracer_provider(),
+        timeout_millis=trace_timeout_ms,
+        signal_name="trace",
+    )
+
+    total_duration_ms = round((time.perf_counter() - flush_started_at) * 1000, 2)
+
+    return {
+        "total_duration_ms": total_duration_ms,
+        "metric": metric_result,
+        "trace": trace_result,
+    }

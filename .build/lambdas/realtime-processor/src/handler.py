@@ -35,6 +35,10 @@ from .observability import (
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "dev")
 
+ENABLE_OTEL_FLUSH = (
+    os.getenv("ENABLE_OTEL_FLUSH", "true").lower() == "true"
+)
+
 AGGREGATES_TABLE_NAME = os.getenv("AGGREGATES_TABLE_NAME")
 BROADCAST_QUEUE_URL = os.getenv("BROADCAST_QUEUE_URL")
 
@@ -1127,6 +1131,57 @@ def lambda_handler(event, context):
         raise
 
     finally:
-        # Lambda executions are short-lived. Force flushing prevents metrics/traces
-        # from staying in memory until the runtime is frozen.
-        flush_otel()
+        flush_result = {
+            "total_duration_ms": 0.0,
+            "metric": {
+                "attempted": False,
+                "succeeded": False,
+                "duration_ms": 0.0,
+                "timeout_ms": 0,
+                "error": None,
+            },
+            "trace": {
+                "attempted": False,
+                "succeeded": False,
+                "duration_ms": 0.0,
+                "timeout_ms": 0,
+                "error": None,
+            },
+        }
+
+        if ENABLE_OTEL_FLUSH:
+            flush_result = flush_otel()
+
+        total_duration_ms = round(
+            (time.perf_counter() - start_time) * 1000,
+            2,
+        )
+
+        logger.info(
+            json.dumps(
+                {
+                    "message": (
+                        "otel_local_flush_completed"
+                        if ENABLE_OTEL_FLUSH
+                        else "otel_flush_skipped"
+                    ),
+                    "service": "realtime-processor",
+                    "component": "realtime-processing",
+                    "environment": ENVIRONMENT,
+                    "aws_request_id": aws_request_id,
+                    "otel_flush_enabled": ENABLE_OTEL_FLUSH,
+                    "flush_duration_ms": flush_result["total_duration_ms"],
+                    "metric_flush_attempted": flush_result["metric"]["attempted"],
+                    "metric_flush_succeeded": flush_result["metric"]["succeeded"],
+                    "metric_flush_duration_ms": flush_result["metric"]["duration_ms"],
+                    "metric_flush_timeout_ms": flush_result["metric"]["timeout_ms"],
+                    "metric_flush_error": flush_result["metric"]["error"],
+                    "trace_flush_attempted": flush_result["trace"]["attempted"],
+                    "trace_flush_succeeded": flush_result["trace"]["succeeded"],
+                    "trace_flush_duration_ms": flush_result["trace"]["duration_ms"],
+                    "trace_flush_timeout_ms": flush_result["trace"]["timeout_ms"],
+                    "trace_flush_error": flush_result["trace"]["error"],
+                    "total_duration_ms": total_duration_ms,
+                }
+            )
+        )
