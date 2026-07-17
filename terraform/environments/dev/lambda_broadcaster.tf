@@ -1,8 +1,7 @@
 locals {
   # Community OpenTelemetry Collector Lambda Extension.
   # This ARN targets the default Lambda architecture (x86_64 / amd64).
-  otel_collector_layer_arn = "arn:aws:lambda:${var.aws_region}:184161586896:layer:opentelemetry-collector-amd64-0_22_0:1"
-
+  otel_collector_layer_arn = "arn:aws:lambda:${var.aws_region}:184161586896:layer:opentelemetry-collector-arm64-0_22_0:1"
   # The current Python SDK header is normally formatted as:
   #   Authorization=Basic%20<base64>
   # The Collector YAML expects only the HTTP header value:
