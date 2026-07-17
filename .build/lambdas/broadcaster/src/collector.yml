@@ -1,0 +1,54 @@
+Bibliothèque
+/
+Architect AWS
+/
+collector.yaml
+
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  # Batch reduces the number of remote requests to Grafana Cloud.
+  batch:
+    timeout: 5s
+    send_batch_size: 256
+    send_batch_max_size: 512
+
+  # Lambda-aware queue between the receiver and exporter. It lets the function
+  # return after the local handoff while the extension exports asynchronously.
+  # It must remain the last processor in each pipeline.
+  decouple:
+    max_queue_size: 2048
+
+exporters:
+  otlphttp/grafana_cloud:
+    endpoint: ${env:GRAFANA_OTLP_ENDPOINT}
+    headers:
+      Authorization: ${env:GRAFANA_OTLP_AUTHORIZATION}
+    compression: gzip
+    timeout: 3s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 500ms
+      max_interval: 5s
+      max_elapsed_time: 30s
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, decouple]
+      exporters: [otlphttp/grafana_cloud]
+
+    metrics:
+      receivers: [otlp]
+      processors: [batch, decouple]
+      exporters: [otlphttp/grafana_cloud]
+
+  telemetry:
+    logs:
+      level: warn

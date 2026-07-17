@@ -1545,8 +1545,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     span_kwargs = {"context": parent_context} if parent_context is not None else {}
 
 
-    invocation_start = time.perf_counter()
-
     try:
         with tracer.start_as_current_span("broadcaster.lambda_handler", **span_kwargs) as span:
             span.set_attribute("faas.trigger", "sqs")
@@ -1615,16 +1613,26 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             }
             
     finally:
-        flush_start = time.perf_counter()
-        flush_duration_ms = 0.0
+        flush_result = {
+            "total_duration_ms": 0.0,
+            "metric": {
+                "attempted": False,
+                "succeeded": False,
+                "duration_ms": 0.0,
+                "timeout_ms": 0,
+                "error": None,
+            },
+            "trace": {
+                "attempted": False,
+                "succeeded": False,
+                "duration_ms": 0.0,
+                "timeout_ms": 0,
+                "error": None,
+            },
+        }
 
         if ENABLE_OTEL_FLUSH:
-            flush_otel()
-
-            flush_duration_ms = round(
-                (time.perf_counter() - flush_start) * 1000,
-                2,
-            )
+            flush_result = flush_otel()
 
         total_duration_ms = round(
             (time.perf_counter() - start_time) * 1000,
@@ -1632,15 +1640,27 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
 
         logger.info(
-            json.dumps({
-                "message": (
-                    "otel_flush_completed"
-                    if ENABLE_OTEL_FLUSH
-                    else "otel_flush_skipped"
-                ),
-                "aws_request_id": aws_request_id,
-                "otel_flush_enabled": ENABLE_OTEL_FLUSH,
-                "flush_duration_ms": flush_duration_ms,
-                "total_duration_ms": total_duration_ms,
-            })
+            json.dumps(
+                {
+                    "message": (
+                        "otel_local_flush_completed"
+                        if ENABLE_OTEL_FLUSH
+                        else "otel_flush_skipped"
+                    ),
+                    "aws_request_id": aws_request_id,
+                    "otel_flush_enabled": ENABLE_OTEL_FLUSH,
+                    "flush_duration_ms": flush_result["total_duration_ms"],
+                    "metric_flush_attempted": flush_result["metric"]["attempted"],
+                    "metric_flush_succeeded": flush_result["metric"]["succeeded"],
+                    "metric_flush_duration_ms": flush_result["metric"]["duration_ms"],
+                    "metric_flush_timeout_ms": flush_result["metric"]["timeout_ms"],
+                    "metric_flush_error": flush_result["metric"]["error"],
+                    "trace_flush_attempted": flush_result["trace"]["attempted"],
+                    "trace_flush_succeeded": flush_result["trace"]["succeeded"],
+                    "trace_flush_duration_ms": flush_result["trace"]["duration_ms"],
+                    "trace_flush_timeout_ms": flush_result["trace"]["timeout_ms"],
+                    "trace_flush_error": flush_result["trace"]["error"],
+                    "total_duration_ms": total_duration_ms,
+                }
+            )
         )
