@@ -99,9 +99,9 @@ module "ecs_collector" {
   sample_rate            = var.collector_sample_rate
   log_level              = var.collector_log_level
 
-  kinesis_max_retries                  = 3
-  kinesis_retry_base_sleep_seconds     = 0.5
-  reconnect_sleep_seconds              = 5
+  kinesis_max_retries              = 3
+  kinesis_retry_base_sleep_seconds = 0.5
+  reconnect_sleep_seconds          = 5
 
   # Prevent two SSE collectors from running simultaneously during deployment.
   deployment_minimum_healthy_percent = 0

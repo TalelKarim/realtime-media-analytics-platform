@@ -24,7 +24,7 @@ tags = {
 
 
 # ECS Fargate Collector 
-collector_image_tag              = "dev-001"
+collector_image_tag              = "otel-alloy-v1"
 collector_desired_count          = 1
 collector_task_cpu               = 256
 collector_task_memory            = 512
