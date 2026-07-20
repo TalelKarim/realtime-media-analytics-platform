@@ -45,7 +45,7 @@ module "realtime_processor_lambda" {
     BROADCAST_QUEUE_URL   = module.sqs.broadcast_signal_queue_url
 
     AGGREGATION_WINDOW_SECONDS  = "60"
-    BROADCAST_WINDOW_SECONDS    = "4"
+    BROADCAST_WINDOW_SECONDS    = "3"
     GLOBAL_ACTIVITY_SHARD_COUNT = "10"
     TOP_METRIC_SHARD_COUNT      = "10"
     AGGREGATE_TTL_DAYS          = "2"
