@@ -8,9 +8,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 import boto3
-from opentelemetry import trace as otel_trace
+from opentelemetry import propagate, trace as otel_trace
+from opentelemetry.context import Context
 from opentelemetry.propagate import inject
-from opentelemetry.trace import Status, StatusCode
+from opentelemetry.trace import Link, Status, StatusCode
 
 from .observability import (
     broadcast_signal_duration_ms,
@@ -814,21 +815,119 @@ def _send_broadcast_signal(
 
 
 # ---------------------------------------------------------------------------
+# Kinesis trace-context extraction
+# ---------------------------------------------------------------------------
+
+def _extract_trace_context_from_kinesis_record(
+    record: dict[str, Any],
+) -> tuple[Context, Any] | None:
+    """Extract W3C trace context added by the ECS collector."""
+    try:
+        envelope = _decode_kinesis_record(record)
+    except Exception:
+        return None
+
+    carrier = envelope.get("trace_context")
+    if not isinstance(carrier, dict) or not carrier.get("traceparent"):
+        return None
+
+    try:
+        extracted_context = propagate.extract(carrier=carrier)
+        span_context = otel_trace.get_current_span(
+            extracted_context
+        ).get_span_context()
+    except Exception:
+        return None
+
+    if not span_context or not span_context.is_valid:
+        return None
+
+    return extracted_context, span_context
+
+
+def _kinesis_parent_context_and_links(
+    records: list[dict[str, Any]],
+) -> tuple[Context | None, list[Link], int]:
+    """
+    Build one parent context plus links for additional producer contexts.
+
+    Records produced by the same collector flush carry the same trace context.
+    A Lambda batch can nevertheless contain records from multiple flushes. A
+    span has one parent, so the first unique producer becomes the parent and the
+    remaining unique producer contexts are represented as span links.
+    """
+    unique_contexts: dict[tuple[int, int], tuple[Context, Any]] = {}
+
+    for record in records:
+        extracted = _extract_trace_context_from_kinesis_record(record)
+        if extracted is None:
+            continue
+
+        extracted_context, span_context = extracted
+        key = (span_context.trace_id, span_context.span_id)
+        unique_contexts.setdefault(key, (extracted_context, span_context))
+
+    if not unique_contexts:
+        return None, [], 0
+
+    ordered_contexts = list(unique_contexts.values())
+    parent_context = ordered_contexts[0][0]
+    links = [
+        Link(
+            span_context,
+            attributes={
+                "messaging.system": "aws.kinesis",
+                "messaging.operation.name": "receive",
+            },
+        )
+        for _, span_context in ordered_contexts[1:]
+    ]
+
+    return parent_context, links, len(ordered_contexts)
+
+
+# ---------------------------------------------------------------------------
 # Lambda entrypoint
 # ---------------------------------------------------------------------------
 
 def lambda_handler(event, context):
     start_time = time.perf_counter()
     aws_request_id = getattr(context, "aws_request_id", None)
+    records = event.get("Records", [])
+
+    parent_context, producer_links, producer_context_count = (
+        _kinesis_parent_context_and_links(records)
+    )
+
+    span_kwargs: dict[str, Any] = {}
+    if parent_context is not None:
+        span_kwargs["context"] = parent_context
+    if producer_links:
+        span_kwargs["links"] = producer_links
 
     metric_base_attrs = {
         "environment": ENVIRONMENT,
     }
 
     try:
-        with tracer.start_as_current_span("realtime_processor.lambda_handler") as span:
+        with tracer.start_as_current_span(
+            "realtime_processor.lambda_handler",
+            **span_kwargs,
+        ) as span:
             span.set_attribute("faas.trigger", "kinesis")
             span.set_attribute("faas.execution", aws_request_id or "unknown")
+            span.set_attribute(
+                "otel.kinesis_producer_context_count",
+                producer_context_count,
+            )
+            span.set_attribute(
+                "otel.kinesis_producer_link_count",
+                len(producer_links),
+            )
+            span.set_attribute(
+                "otel.kinesis_parent_context_extracted",
+                parent_context is not None,
+            )
 
             if not AGGREGATES_TABLE_NAME:
                 raise RuntimeError("Missing required env var: AGGREGATES_TABLE_NAME")
@@ -836,7 +935,6 @@ def lambda_handler(event, context):
             if table is None:
                 raise RuntimeError("DynamoDB table client is not initialized")
 
-            records = event.get("Records", [])
             now = _utc_now()
             now_iso = _to_iso_z(now)
             ttl = int(time.time()) + (AGGREGATE_TTL_DAYS * 86400)
@@ -850,6 +948,9 @@ def lambda_handler(event, context):
                 aws_request_id=aws_request_id,
                 record_count=len(records),
                 table=AGGREGATES_TABLE_NAME,
+                kinesis_parent_context_extracted=parent_context is not None,
+                kinesis_producer_context_count=producer_context_count,
+                kinesis_producer_link_count=len(producer_links),
             )
 
             decoded_count = 0

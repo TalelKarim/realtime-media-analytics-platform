@@ -28,7 +28,12 @@ output "task_definition_family" {
   value       = aws_ecs_task_definition.this.family
 }
 
-output "container_image" {
-  description = "Container image configured in the task definition."
-  value       = local.container_image
+output "collector_container_image" {
+  description = "Collector application image."
+  value       = local.collector_container_image
+}
+
+output "alloy_container_image" {
+  description = "Grafana Alloy sidecar image."
+  value       = var.alloy_image
 }

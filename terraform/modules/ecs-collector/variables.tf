@@ -37,17 +37,38 @@ variable "repository_url" {
 }
 
 variable "image_tag" {
-  description = "Versioned image tag to deploy."
+  description = "Versioned collector application image tag to deploy."
+  type        = string
+}
+
+variable "alloy_image" {
+  description = "Full image reference for the custom Grafana Alloy sidecar image."
+  type        = string
+}
+
+variable "collector_service_version" {
+  description = "Version resource attribute attached to collector telemetry."
+  type        = string
+  default     = "unknown"
+}
+
+variable "grafana_otlp_endpoint" {
+  description = "Grafana Cloud OTLP/HTTP base endpoint, normally ending in /otlp."
+  type        = string
+}
+
+variable "grafana_otlp_authorization_secret_arn" {
+  description = "Secrets Manager ARN containing the complete Authorization header value."
   type        = string
 }
 
 variable "execution_role_arn" {
-  description = "ECS task execution role ARN. Used by ECS to pull image and write logs."
+  description = "ECS task execution role ARN."
   type        = string
 }
 
 variable "task_role_arn" {
-  description = "ECS task role ARN. Used by collector application code."
+  description = "ECS task role ARN used by collector application code."
   type        = string
 }
 
@@ -68,7 +89,7 @@ variable "assign_public_ip" {
 }
 
 variable "log_group_name" {
-  description = "CloudWatch Log Group used by the collector container."
+  description = "CloudWatch Log Group shared by collector and Alloy streams."
   type        = string
 }
 
@@ -84,19 +105,19 @@ variable "wikimedia_stream_url" {
 }
 
 variable "batch_size" {
-  description = "Maximum number of records buffered before PutRecords."
+  description = "Maximum number of retained events buffered before PutRecords."
   type        = number
   default     = 100
 }
 
 variable "flush_interval_seconds" {
-  description = "Maximum time before flushing buffered records."
+  description = "Maximum time before flushing buffered events."
   type        = number
   default     = 2
 }
 
 variable "sample_rate" {
-  description = "Sampling rate applied by collector. 1.0 means all events, 0.01 means 1 percent."
+  description = "Deterministic application sampling rate."
   type        = number
   default     = 0.01
 }
@@ -107,22 +128,76 @@ variable "log_level" {
   default     = "INFO"
 }
 
-variable "task_cpu" {
-  description = "Fargate task CPU units."
+variable "kinesis_max_retries" {
+  description = "Maximum additional PutRecords retries."
   type        = number
-  default     = 256
+  default     = 3
 }
 
-variable "task_memory" {
-  description = "Fargate task memory in MiB."
+variable "kinesis_retry_base_sleep_seconds" {
+  description = "Base backoff delay for PutRecords retries."
+  type        = number
+  default     = 0.5
+}
+
+variable "reconnect_sleep_seconds" {
+  description = "Delay before reconnecting to Wikimedia SSE."
+  type        = number
+  default     = 5
+}
+
+variable "task_cpu" {
+  description = "Fargate task CPU units. Use at least 512 with Alloy."
   type        = number
   default     = 512
 }
 
-variable "desired_count" {
-  description = "Number of collector tasks to run."
+variable "task_memory" {
+  description = "Fargate task memory in MiB. Use at least 1024 with Alloy."
   type        = number
-  default     = 0
+  default     = 1024
+}
+
+variable "collector_container_cpu" {
+  description = "CPU units assigned to the Python collector container."
+  type        = number
+  default     = 320
+}
+
+variable "collector_container_memory_reservation" {
+  description = "Collector soft memory reservation in MiB."
+  type        = number
+  default     = 512
+}
+
+variable "collector_container_memory" {
+  description = "Collector hard memory limit in MiB."
+  type        = number
+  default     = 640
+}
+
+variable "alloy_container_cpu" {
+  description = "CPU units assigned to Grafana Alloy."
+  type        = number
+  default     = 192
+}
+
+variable "alloy_container_memory_reservation" {
+  description = "Alloy soft memory reservation in MiB."
+  type        = number
+  default     = 256
+}
+
+variable "alloy_container_memory" {
+  description = "Alloy hard memory limit in MiB."
+  type        = number
+  default     = 384
+}
+
+variable "desired_count" {
+  description = "Number of collector tasks to run. Keep 1 for this source."
+  type        = number
+  default     = 1
 }
 
 variable "cpu_architecture" {
@@ -136,6 +211,18 @@ variable "cpu_architecture" {
   }
 }
 
+variable "deployment_minimum_healthy_percent" {
+  description = "Minimum healthy percent during deployment. Keep 0 to avoid overlapping collectors."
+  type        = number
+  default     = 0
+}
+
+variable "deployment_maximum_percent" {
+  description = "Maximum running percent during deployment. Keep 100 to avoid overlapping collectors."
+  type        = number
+  default     = 100
+}
+
 variable "container_insights_enabled" {
   description = "Enable ECS Container Insights on the cluster."
   type        = bool
@@ -143,7 +230,7 @@ variable "container_insights_enabled" {
 }
 
 variable "enable_execute_command" {
-  description = "Enable ECS Exec. Keep false until SSM endpoints and permissions are ready."
+  description = "Enable ECS Exec."
   type        = bool
   default     = false
 }
