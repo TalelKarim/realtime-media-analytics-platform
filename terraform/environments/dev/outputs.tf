@@ -238,7 +238,7 @@ output "ecs_collector_task_definition_arn" {
 
 output "ecs_collector_container_image" {
   description = "Collector container image configured in task definition"
-  value       = module.ecs_collector.container_image
+  value       = module.ecs_collector.collector_container_image
 }
 
 
