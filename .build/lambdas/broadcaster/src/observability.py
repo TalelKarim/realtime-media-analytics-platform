@@ -8,6 +8,12 @@ from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExp
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.botocore import BotocoreInstrumentor
 from opentelemetry.sdk.metrics import MeterProvider
+
+from opentelemetry.sdk.metrics.view import (
+    ExplicitBucketHistogramAggregation,
+    View,
+)
+
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -116,9 +122,46 @@ def setup_otel() -> None:
             ),
         )
 
+        freshness_bucket_boundaries_ms = [
+            0.0,
+            1000.0,
+            2000.0,
+            3000.0,
+            4000.0,
+            5000.0,
+            6000.0,
+            7500.0,
+            10000.0,
+            12500.0,
+            15000.0,
+            20000.0,
+            30000.0,
+            45000.0,
+            60000.0,
+            90000.0,
+            120000.0,
+        ]
+
+        freshness_views = [
+            View(
+                instrument_name="event_to_dashboard_latency_ms",
+                aggregation=ExplicitBucketHistogramAggregation(
+                    boundaries=freshness_bucket_boundaries_ms,
+                    record_min_max=True,
+                ),
+            ),
+            View(
+                instrument_name="oldest_event_to_dashboard_latency_ms",
+                aggregation=ExplicitBucketHistogramAggregation(
+                    boundaries=freshness_bucket_boundaries_ms,
+                    record_min_max=True,
+                ),
+            ),
+        ]
         meter_provider = MeterProvider(
             resource=resource,
             metric_readers=[metric_reader],
+            views=freshness_views,
         )
         metrics.set_meter_provider(meter_provider)
 
