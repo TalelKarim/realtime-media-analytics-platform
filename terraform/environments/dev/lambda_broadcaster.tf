@@ -27,7 +27,7 @@ module "lambda_broadcaster" {
   role_arn = module.iam.broadcaster_role_arn
 
   timeout     = 30
-  memory_size = 256
+  memory_size = 1536
 
   # The Collector runs as a Lambda Extension in the same execution environment.
   layers = [
