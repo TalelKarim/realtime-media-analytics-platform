@@ -258,6 +258,43 @@ active_connections_scanned = meter.create_histogram(
 )
 
 
+connections_scan_duration_ms = meter.create_histogram(
+    name="connections_scan_duration_ms",
+    unit="ms",
+    description="Duration of one websocket_connections table scan.",
+)
+
+aggregate_reads_duration_ms = meter.create_histogram(
+    name="aggregate_reads_duration_ms",
+    unit="ms",
+    description="Duration of aggregate reads required to build one topic payload.",
+)
+
+payload_build_duration_ms = meter.create_histogram(
+    name="payload_build_duration_ms",
+    unit="ms",
+    description="Duration of building one WebSocket topic payload.",
+)
+
+fanout_duration_ms = meter.create_histogram(
+    name="fanout_duration_ms",
+    unit="ms",
+    description="Duration of one bounded-parallel WebSocket fan-out.",
+)
+
+fanout_batch_size = meter.create_histogram(
+    name="fanout_batch_size",
+    unit="1",
+    description="Number of WebSocket connections attempted in one fan-out.",
+)
+
+gone_cleanup_duration_ms = meter.create_histogram(
+    name="gone_cleanup_duration_ms",
+    unit="ms",
+    description="Duration of batched DynamoDB cleanup for Gone WebSocket connections.",
+)
+
+
 def _force_flush_provider(
     provider: Any,
     timeout_millis: int,

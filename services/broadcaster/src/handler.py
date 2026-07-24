@@ -1,30 +1,46 @@
 import json
 import logging
 import os
+import random
 import time
-from datetime import datetime, timezone, timedelta
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
+from contextvars import copy_context
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.types import TypeDeserializer
+from botocore.config import Config
 from botocore.exceptions import ClientError
-
-
 
 from opentelemetry import propagate, trace as otel_trace
 from opentelemetry.context import Context
 from opentelemetry.propagators.textmap import Getter
 from opentelemetry.trace import Status, StatusCode
 
+try:
+    from opentelemetry.instrumentation.utils import suppress_instrumentation
+except ImportError:
+    # Compatibility fallback for older opentelemetry-instrumentation packages.
+    def suppress_instrumentation():
+        return nullcontext()
+
 from .observability import (
     active_connections_scanned,
+    aggregate_reads_duration_ms,
     broadcast_completed_total,
     broadcast_duration_ms,
     broadcast_failed_total,
+    connections_scan_duration_ms,
     event_to_dashboard_latency_ms,
+    fanout_batch_size,
+    fanout_duration_ms,
     flush_otel,
+    gone_cleanup_duration_ms,
     oldest_event_to_dashboard_latency_ms,
+    payload_build_duration_ms,
     tracer,
     websocket_connection_gone_total,
     websocket_messages_sent_total,
@@ -41,12 +57,84 @@ from .observability import (
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "dev")
 
+logger = logging.getLogger()
+logger.setLevel(LOG_LEVEL)
 
 
-ENABLE_OTEL_FLUSH = (
-    os.getenv("ENABLE_OTEL_FLUSH", "true").lower() == "true"
+def _env_int(
+    name: str,
+    default: int,
+    minimum: int = 1,
+    maximum: Optional[int] = None,
+) -> int:
+    raw_value = os.getenv(name)
+
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        logger.warning("invalid_integer_environment_variable: %s=%r", name, raw_value)
+        return default
+
+    if value < minimum:
+        logger.warning(
+            "environment_variable_below_minimum: %s=%r minimum=%s",
+            name,
+            raw_value,
+            minimum,
+        )
+        return default
+
+    if maximum is not None and value > maximum:
+        logger.warning(
+            "environment_variable_above_maximum: %s=%r maximum=%s",
+            name,
+            raw_value,
+            maximum,
+        )
+        return maximum
+
+    return value
+
+
+def _env_float(
+    name: str,
+    default: float,
+    minimum: float = 0.1,
+) -> float:
+    raw_value = os.getenv(name)
+
+    if raw_value is None:
+        return default
+
+    try:
+        value = float(raw_value)
+    except ValueError:
+        logger.warning("invalid_float_environment_variable: %s=%r", name, raw_value)
+        return default
+
+    if value < minimum:
+        logger.warning(
+            "environment_variable_below_minimum: %s=%r minimum=%s",
+            name,
+            raw_value,
+            minimum,
+        )
+        return default
+
+    return value
+
+
+ENABLE_OTEL_FLUSH = os.getenv("ENABLE_OTEL_FLUSH", "true").lower() == "true"
+
+# Per-PostToConnection botocore spans are expensive at high fan-out. The
+# high-level broadcaster.fanout span plus metrics remain enabled. Set this to
+# true temporarily when detailed per-connection trace debugging is required.
+TRACE_POST_TO_CONNECTION_CALLS = (
+    os.getenv("TRACE_POST_TO_CONNECTION_CALLS", "false").lower() == "true"
 )
-
 
 AGGREGATES_TABLE_NAME = os.environ["AGGREGATES_TABLE_NAME"]
 CONNECTIONS_TABLE_NAME = os.environ["CONNECTIONS_TABLE_NAME"]
@@ -54,11 +142,76 @@ WEBSOCKET_ENDPOINT_URL = os.environ["WEBSOCKET_ENDPOINT_URL"]
 # Example:
 # https://abc123.execute-api.eu-west-1.amazonaws.com/dev
 
-GLOBAL_ACTIVITY_SHARD_COUNT = int(os.getenv("GLOBAL_ACTIVITY_SHARD_COUNT", "10"))
-TOP_METRIC_SHARD_COUNT = int(os.getenv("TOP_METRIC_SHARD_COUNT", "10"))
+GLOBAL_ACTIVITY_SHARD_COUNT = _env_int("GLOBAL_ACTIVITY_SHARD_COUNT", 10)
+TOP_METRIC_SHARD_COUNT = _env_int("TOP_METRIC_SHARD_COUNT", 10)
 
-TOP_WIKIS_LIMIT = int(os.getenv("TOP_WIKIS_LIMIT", "10"))
-TOP_PAGES_LIMIT = int(os.getenv("TOP_PAGES_LIMIT", "10"))
+TOP_WIKIS_LIMIT = _env_int("TOP_WIKIS_LIMIT", 10)
+TOP_PAGES_LIMIT = _env_int("TOP_PAGES_LIMIT", 10)
+
+# One bounded pool per warm Lambda execution environment.
+# 40 is intentionally conservative enough for API Gateway while removing the
+# sequential fan-out bottleneck for hundreds of connections.
+MAX_POST_WORKERS = _env_int(
+    "MAX_POST_WORKERS",
+    40,
+    minimum=1,
+    maximum=200,
+)
+DYNAMODB_READ_WORKERS = _env_int(
+    "DYNAMODB_READ_WORKERS",
+    24,
+    minimum=1,
+    maximum=64,
+)
+
+APIGW_MAX_POOL_CONNECTIONS = _env_int(
+    "APIGW_MAX_POOL_CONNECTIONS",
+    max(MAX_POST_WORKERS + 8, 48),
+    minimum=MAX_POST_WORKERS,
+    maximum=256,
+)
+DYNAMODB_MAX_POOL_CONNECTIONS = _env_int(
+    "DYNAMODB_MAX_POOL_CONNECTIONS",
+    max(DYNAMODB_READ_WORKERS + 8, 32),
+    minimum=DYNAMODB_READ_WORKERS,
+    maximum=128,
+)
+
+APIGW_CONNECT_TIMEOUT_SECONDS = _env_float(
+    "APIGW_CONNECT_TIMEOUT_SECONDS",
+    2.0,
+)
+APIGW_READ_TIMEOUT_SECONDS = _env_float(
+    "APIGW_READ_TIMEOUT_SECONDS",
+    5.0,
+)
+APIGW_RETRY_MAX_ATTEMPTS = _env_int(
+    "APIGW_RETRY_MAX_ATTEMPTS",
+    2,
+    minimum=1,
+    maximum=5,
+)
+
+DYNAMODB_CONNECT_TIMEOUT_SECONDS = _env_float(
+    "DYNAMODB_CONNECT_TIMEOUT_SECONDS",
+    2.0,
+)
+DYNAMODB_READ_TIMEOUT_SECONDS = _env_float(
+    "DYNAMODB_READ_TIMEOUT_SECONDS",
+    5.0,
+)
+DYNAMODB_RETRY_MAX_ATTEMPTS = _env_int(
+    "DYNAMODB_RETRY_MAX_ATTEMPTS",
+    4,
+    minimum=1,
+    maximum=8,
+)
+DYNAMODB_BATCH_GET_MAX_RETRIES = _env_int(
+    "DYNAMODB_BATCH_GET_MAX_RETRIES",
+    5,
+    minimum=1,
+    maximum=10,
+)
 
 CHANGE_TYPES = [
     value.strip()
@@ -76,21 +229,51 @@ ENABLE_TOP_PAGES_TOPIC = os.getenv("ENABLE_TOP_PAGES_TOPIC", "true").lower() == 
 
 
 # ---------------------------------------------------------------------------
-# AWS clients
+# AWS clients and reusable thread pools
 # ---------------------------------------------------------------------------
 
-logger = logging.getLogger()
-logger.setLevel(LOG_LEVEL)
+dynamodb_resource = boto3.resource("dynamodb")
+connections_table = dynamodb_resource.Table(CONNECTIONS_TABLE_NAME)
 
-dynamodb = boto3.resource("dynamodb")
-aggregates_table = dynamodb.Table(AGGREGATES_TABLE_NAME)
-connections_table = dynamodb.Table(CONNECTIONS_TABLE_NAME)
+# Low-level clients are used inside worker threads. Boto3 clients can be shared
+# between threads; DynamoDB Resource objects remain on the main thread.
+dynamodb_client = boto3.client(
+    "dynamodb",
+    config=Config(
+        max_pool_connections=DYNAMODB_MAX_POOL_CONNECTIONS,
+        connect_timeout=DYNAMODB_CONNECT_TIMEOUT_SECONDS,
+        read_timeout=DYNAMODB_READ_TIMEOUT_SECONDS,
+        retries={
+            "mode": "standard",
+            "max_attempts": DYNAMODB_RETRY_MAX_ATTEMPTS,
+        },
+    ),
+)
 
 apigw_management = boto3.client(
     "apigatewaymanagementapi",
     endpoint_url=WEBSOCKET_ENDPOINT_URL,
+    config=Config(
+        max_pool_connections=APIGW_MAX_POOL_CONNECTIONS,
+        connect_timeout=APIGW_CONNECT_TIMEOUT_SECONDS,
+        read_timeout=APIGW_READ_TIMEOUT_SECONDS,
+        retries={
+            "mode": "standard",
+            "max_attempts": APIGW_RETRY_MAX_ATTEMPTS,
+        },
+    ),
 )
 
+POST_EXECUTOR = ThreadPoolExecutor(
+    max_workers=MAX_POST_WORKERS,
+    thread_name_prefix="ws-post",
+)
+DYNAMODB_READ_EXECUTOR = ThreadPoolExecutor(
+    max_workers=DYNAMODB_READ_WORKERS,
+    thread_name_prefix="ddb-read",
+)
+
+DYNAMODB_DESERIALIZER = TypeDeserializer()
 
 # ---------------------------------------------------------------------------
 # Generic helpers
@@ -468,115 +651,237 @@ def get_event_count(item: Optional[Dict[str, Any]]) -> int:
 # DynamoDB read helpers — realtime_aggregates
 # ---------------------------------------------------------------------------
 
-def get_metric_item(metric_key: str, window_key: str) -> Optional[Dict[str, Any]]:
-    response = aggregates_table.get_item(
-        Key={
-            "metric_key": metric_key,
-            "window_key": window_key,
+
+def _submit_with_context(
+    executor: ThreadPoolExecutor,
+    function: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Future:
+    """
+    Submit one task while copying the current OpenTelemetry/contextvars context.
+
+    Python does not automatically propagate contextvars into worker threads.
+    Giving every task its own copied context keeps botocore spans attached to
+    the current broadcaster trace.
+    """
+    context = copy_context()
+
+    def runner() -> Any:
+        return function(*args, **kwargs)
+
+    return executor.submit(context.run, runner)
+
+
+def _deserialize_dynamodb_item(raw_item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: DYNAMODB_DESERIALIZER.deserialize(value)
+        for key, value in raw_item.items()
+    }
+
+
+def _chunks(values: List[str], size: int) -> List[List[str]]:
+    return [
+        values[index : index + size]
+        for index in range(0, len(values), size)
+    ]
+
+
+def _batch_get_metric_counts(
+    metric_keys: List[str],
+    window_key: str,
+) -> Dict[str, int]:
+    """
+    Retrieve exact-key aggregate counters with BatchGetItem.
+
+    A batch can hold up to 100 keys. UnprocessedKeys are retried with bounded
+    exponential backoff and jitter.
+    """
+    unique_metric_keys = list(dict.fromkeys(metric_keys))
+    counts: Dict[str, int] = {}
+
+    for metric_key_chunk in _chunks(unique_metric_keys, 100):
+        request_items: Dict[str, Any] = {
+            AGGREGATES_TABLE_NAME: {
+                "Keys": [
+                    {
+                        "metric_key": {"S": metric_key},
+                        "window_key": {"S": window_key},
+                    }
+                    for metric_key in metric_key_chunk
+                ],
+                "ProjectionExpression": "#mk, #wk, #ec",
+                "ExpressionAttributeNames": {
+                    "#mk": "metric_key",
+                    "#wk": "window_key",
+                    "#ec": "event_count",
+                },
+                "ConsistentRead": False,
+            }
         }
-    )
 
-    return response.get("Item")
+        attempt = 0
+
+        while request_items:
+            response = dynamodb_client.batch_get_item(
+                RequestItems=request_items,
+            )
+
+            for raw_item in response.get("Responses", {}).get(
+                AGGREGATES_TABLE_NAME,
+                [],
+            ):
+                item = _deserialize_dynamodb_item(raw_item)
+                metric_key = item.get("metric_key")
+
+                if metric_key:
+                    counts[str(metric_key)] = get_event_count(item)
+
+            unprocessed = response.get("UnprocessedKeys") or {}
+            table_unprocessed = unprocessed.get(AGGREGATES_TABLE_NAME) or {}
+
+            if not table_unprocessed.get("Keys"):
+                break
+
+            attempt += 1
+
+            if attempt > DYNAMODB_BATCH_GET_MAX_RETRIES:
+                remaining_key_count = len(table_unprocessed.get("Keys", []))
+                raise RuntimeError(
+                    "DynamoDB BatchGetItem still has "
+                    f"{remaining_key_count} unprocessed keys after "
+                    f"{DYNAMODB_BATCH_GET_MAX_RETRIES} retries"
+                )
+
+            sleep_seconds = min(
+                0.05 * (2 ** (attempt - 1)) + random.uniform(0.0, 0.025),
+                1.0,
+            )
+            time.sleep(sleep_seconds)
+            request_items = {
+                AGGREGATES_TABLE_NAME: table_unprocessed,
+            }
+
+    return counts
 
 
-def get_metric_count(metric_key: str, window_key: str) -> int:
-    return get_event_count(get_metric_item(metric_key, window_key))
+def _query_metric_items(
+    metric_key: str,
+    window_key_prefix: str,
+    projection_expression: str,
+    projection_attribute_names: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    """
+    Query one aggregate partition and follow LastEvaluatedKey pagination.
 
-
-def query_metric_items(metric_key: str, window_key_prefix: str) -> List[Dict[str, Any]]:
+    The low-level DynamoDB client is shared safely between read worker threads.
+    """
     items: List[Dict[str, Any]] = []
-    exclusive_start_key = None
+    exclusive_start_key: Optional[Dict[str, Any]] = None
+
+    expression_attribute_names = {
+        "#mk": "metric_key",
+        "#wk": "window_key",
+        **projection_attribute_names,
+    }
 
     while True:
-        kwargs = {
+        kwargs: Dict[str, Any] = {
+            "TableName": AGGREGATES_TABLE_NAME,
             "KeyConditionExpression": (
-                Key("metric_key").eq(metric_key)
-                & Key("window_key").begins_with(window_key_prefix)
-            )
+                "#mk = :metric_key AND begins_with(#wk, :window_prefix)"
+            ),
+            "ExpressionAttributeNames": expression_attribute_names,
+            "ExpressionAttributeValues": {
+                ":metric_key": {"S": metric_key},
+                ":window_prefix": {"S": window_key_prefix},
+            },
+            "ProjectionExpression": projection_expression,
+            "ConsistentRead": False,
         }
 
         if exclusive_start_key:
             kwargs["ExclusiveStartKey"] = exclusive_start_key
 
-        response = aggregates_table.query(**kwargs)
-        items.extend(response.get("Items", []))
+        response = dynamodb_client.query(**kwargs)
+
+        items.extend(
+            _deserialize_dynamodb_item(raw_item)
+            for raw_item in response.get("Items", [])
+        )
 
         exclusive_start_key = response.get("LastEvaluatedKey")
+
         if not exclusive_start_key:
             break
 
     return items
 
 
-def read_global_activity(window_key: str) -> int:
-    total = 0
-
-    for shard_id in range(GLOBAL_ACTIVITY_SHARD_COUNT):
-        metric_key = f"METRIC#GLOBAL_ACTIVITY#SHARD#{shard_id}"
-        total += get_metric_count(metric_key, window_key)
-
-    return total
-
-
-def read_bot_activity(window_key: str) -> Tuple[int, int, float]:
-    bot_count = get_metric_count("METRIC#BOT_ACTIVITY#BOT#true", window_key)
-    human_count = get_metric_count("METRIC#BOT_ACTIVITY#BOT#false", window_key)
-
-    total = bot_count + human_count
-    bot_ratio = round(bot_count / total, 4) if total > 0 else 0.0
-
-    return bot_count, human_count, bot_ratio
+def _query_top_wikis_shard(
+    shard_id: int,
+    window_key_prefix: str,
+) -> List[Dict[str, Any]]:
+    return _query_metric_items(
+        metric_key=f"METRIC#TOP_WIKIS#SHARD#{shard_id}",
+        window_key_prefix=window_key_prefix,
+        projection_expression="#wk, #wiki, #ec",
+        projection_attribute_names={
+            "#wiki": "wiki",
+            "#ec": "event_count",
+        },
+    )
 
 
-def read_change_types(window_key: str) -> Dict[str, int]:
-    result: Dict[str, int] = {}
+def _query_top_pages_shard(
+    shard_id: int,
+    window_key_prefix: str,
+) -> List[Dict[str, Any]]:
+    return _query_metric_items(
+        metric_key=f"METRIC#TOP_PAGES#SHARD#{shard_id}",
+        window_key_prefix=window_key_prefix,
+        projection_expression=(
+            "#wiki, #title, #ec, #title_url, #namespace, "
+            "#last_change_type, #last_seen_at"
+        ),
+        projection_attribute_names={
+            "#wiki": "wiki",
+            "#title": "title",
+            "#ec": "event_count",
+            "#title_url": "title_url",
+            "#namespace": "namespace",
+            "#last_change_type": "last_change_type",
+            "#last_seen_at": "last_seen_at",
+        },
+    )
 
-    for change_type in CHANGE_TYPES:
-        metric_key = f"METRIC#CHANGE_TYPE#TYPE#{change_type}"
-        result[change_type] = get_metric_count(metric_key, window_key)
 
-    return result
-
-
-def read_namespace_distribution(window_key: str) -> Dict[str, int]:
-    result: Dict[str, int] = {}
-
-    for namespace in NAMESPACES:
-        metric_key = f"METRIC#NAMESPACE#NS#{namespace}"
-        count = get_metric_count(metric_key, window_key)
-
-        if count > 0:
-            result[str(namespace)] = count
-
-    return result
-
-
-def read_top_wikis(window_key: str) -> List[Dict[str, Any]]:
-    prefix = f"{window_key}#WIKI#"
+def _collect_top_wikis(
+    futures: List[Future],
+) -> List[Dict[str, Any]]:
     candidates: Dict[str, int] = {}
 
-    for shard_id in range(TOP_METRIC_SHARD_COUNT):
-        metric_key = f"METRIC#TOP_WIKIS#SHARD#{shard_id}"
-        items = query_metric_items(metric_key, prefix)
-
-        for item in items:
+    for future in as_completed(futures):
+        for item in future.result():
             wiki = item.get("wiki")
 
             if not wiki:
-                # Fallback from SK:
-                # WINDOW#2026-...#WIKI#frwiki
-                window_item_key = item.get("window_key", "")
+                window_item_key = str(item.get("window_key", ""))
+
                 if "#WIKI#" in window_item_key:
                     wiki = window_item_key.split("#WIKI#", 1)[1]
 
             if not wiki:
                 continue
 
-            candidates[wiki] = candidates.get(wiki, 0) + get_event_count(item)
+            wiki_text = str(wiki)
+            candidates[wiki_text] = (
+                candidates.get(wiki_text, 0) + get_event_count(item)
+            )
 
     sorted_wikis = sorted(
         candidates.items(),
-        key=lambda item: item[1],
+        key=lambda candidate: candidate[1],
         reverse=True,
     )
 
@@ -589,14 +894,13 @@ def read_top_wikis(window_key: str) -> List[Dict[str, Any]]:
     ]
 
 
-def _read_top_pages_by_prefix(window_key_prefix: str) -> List[Dict[str, Any]]:
+def _collect_top_pages(
+    futures: List[Future],
+) -> List[Dict[str, Any]]:
     pages: List[Dict[str, Any]] = []
 
-    for shard_id in range(TOP_METRIC_SHARD_COUNT):
-        metric_key = f"METRIC#TOP_PAGES#SHARD#{shard_id}"
-        items = query_metric_items(metric_key, window_key_prefix)
-
-        for item in items:
+    for future in as_completed(futures):
+        for item in future.result():
             pages.append(
                 {
                     "wiki": item.get("wiki"),
@@ -613,92 +917,292 @@ def _read_top_pages_by_prefix(window_key_prefix: str) -> List[Dict[str, Any]]:
     pages = [
         page
         for page in pages
-        if page.get("wiki") and page.get("title") and page.get("count", 0) > 0
+        if page.get("wiki")
+        and page.get("title")
+        and page.get("count", 0) > 0
     ]
-
-    pages.sort(key=lambda page: page["count"], reverse=True)
+    pages.sort(
+        key=lambda page: page["count"],
+        reverse=True,
+    )
 
     return pages[:TOP_PAGES_LIMIT]
 
 
-def read_top_pages(window_key: str) -> List[Dict[str, Any]]:
-    # Global top pages for the whole live aggregation window.
-    return _read_top_pages_by_prefix(f"{window_key}#")
+def read_global_snapshot(window_key: str) -> Tuple[Dict[str, Any], float]:
+    """
+    Read everything needed by the global payload.
 
+    Exact-key counters use one BatchGetItem request. TOP_WIKIS and TOP_PAGES
+    shard queries run concurrently in the DynamoDB read pool.
+    """
+    started_at = time.perf_counter()
 
-def read_top_pages_for_wiki(wiki: str, window_key: str) -> List[Dict[str, Any]]:
-    # Top pages restricted to a single wiki topic.
-    # The realtime processor already stores TOP_PAGES with this SK shape:
-    # WINDOW#{minute}#WIKI#{wiki}#TITLE#{hash}
-    return _read_top_pages_by_prefix(f"{window_key}#WIKI#{wiki}#")
+    global_activity_keys = [
+        f"METRIC#GLOBAL_ACTIVITY#SHARD#{shard_id}"
+        for shard_id in range(GLOBAL_ACTIVITY_SHARD_COUNT)
+    ]
+    bot_keys = [
+        "METRIC#BOT_ACTIVITY#BOT#true",
+        "METRIC#BOT_ACTIVITY#BOT#false",
+    ]
+    change_type_keys = [
+        f"METRIC#CHANGE_TYPE#TYPE#{change_type}"
+        for change_type in CHANGE_TYPES
+    ]
+    namespace_keys = [
+        f"METRIC#NAMESPACE#NS#{namespace}"
+        for namespace in NAMESPACES
+    ]
+    exact_metric_keys = (
+        global_activity_keys
+        + bot_keys
+        + change_type_keys
+        + namespace_keys
+    )
 
-
-def read_wiki_bot_activity(wiki: str, window_key: str) -> Tuple[int, int, float]:
-    bot_count = get_metric_count(
-        f"METRIC#WIKI_BOT_ACTIVITY#WIKI#{wiki}#BOT#true",
+    exact_counts_future = _submit_with_context(
+        DYNAMODB_READ_EXECUTOR,
+        _batch_get_metric_counts,
+        exact_metric_keys,
         window_key,
     )
-    human_count = get_metric_count(
-        f"METRIC#WIKI_BOT_ACTIVITY#WIKI#{wiki}#BOT#false",
+
+    top_wikis_prefix = f"{window_key}#WIKI#"
+    top_wikis_futures = [
+        _submit_with_context(
+            DYNAMODB_READ_EXECUTOR,
+            _query_top_wikis_shard,
+            shard_id,
+            top_wikis_prefix,
+        )
+        for shard_id in range(TOP_METRIC_SHARD_COUNT)
+    ]
+
+    top_pages_prefix = f"{window_key}#"
+    top_pages_futures = [
+        _submit_with_context(
+            DYNAMODB_READ_EXECUTOR,
+            _query_top_pages_shard,
+            shard_id,
+            top_pages_prefix,
+        )
+        for shard_id in range(TOP_METRIC_SHARD_COUNT)
+    ]
+
+    counts = exact_counts_future.result()
+    top_wikis = _collect_top_wikis(top_wikis_futures)
+    top_pages = _collect_top_pages(top_pages_futures)
+
+    current_minute_events_so_far = sum(
+        counts.get(metric_key, 0)
+        for metric_key in global_activity_keys
+    )
+
+    bot_count = counts.get("METRIC#BOT_ACTIVITY#BOT#true", 0)
+    human_count = counts.get("METRIC#BOT_ACTIVITY#BOT#false", 0)
+    bot_total = bot_count + human_count
+    bot_ratio = round(bot_count / bot_total, 4) if bot_total > 0 else 0.0
+
+    change_types = {
+        change_type: counts.get(
+            f"METRIC#CHANGE_TYPE#TYPE#{change_type}",
+            0,
+        )
+        for change_type in CHANGE_TYPES
+    }
+
+    namespace_distribution = {
+        str(namespace): count
+        for namespace in NAMESPACES
+        if (
+            count := counts.get(
+                f"METRIC#NAMESPACE#NS#{namespace}",
+                0,
+            )
+        ) > 0
+    }
+
+    duration_ms = round(
+        (time.perf_counter() - started_at) * 1000,
+        2,
+    )
+
+    return (
+        {
+            "current_minute_events_so_far": current_minute_events_so_far,
+            "bot_count": bot_count,
+            "human_count": human_count,
+            "bot_ratio": bot_ratio,
+            "change_types": change_types,
+            "namespace_distribution": namespace_distribution,
+            "top_wikis": top_wikis,
+            "top_pages": top_pages,
+        },
+        duration_ms,
+    )
+
+
+def read_top_pages_snapshot(
+    window_key_prefix: str,
+) -> Tuple[List[Dict[str, Any]], float]:
+    started_at = time.perf_counter()
+
+    futures = [
+        _submit_with_context(
+            DYNAMODB_READ_EXECUTOR,
+            _query_top_pages_shard,
+            shard_id,
+            window_key_prefix,
+        )
+        for shard_id in range(TOP_METRIC_SHARD_COUNT)
+    ]
+
+    pages = _collect_top_pages(futures)
+    duration_ms = round(
+        (time.perf_counter() - started_at) * 1000,
+        2,
+    )
+
+    return pages, duration_ms
+
+
+def read_wiki_snapshot(
+    wiki: str,
+    window_key: str,
+) -> Tuple[Dict[str, Any], float]:
+    """
+    Read one wiki payload efficiently.
+
+    Exact counters are batched. TOP_PAGES shard queries run concurrently.
+    Different wiki topics are still handled one after another deliberately;
+    topic-level fan-out sharding is the next architecture phase.
+    """
+    started_at = time.perf_counter()
+
+    wiki_activity_key = f"METRIC#WIKI_ACTIVITY#WIKI#{wiki}"
+    bot_true_key = f"METRIC#WIKI_BOT_ACTIVITY#WIKI#{wiki}#BOT#true"
+    bot_false_key = f"METRIC#WIKI_BOT_ACTIVITY#WIKI#{wiki}#BOT#false"
+    change_type_keys = [
+        f"METRIC#WIKI_CHANGE_TYPE#WIKI#{wiki}#TYPE#{change_type}"
+        for change_type in CHANGE_TYPES
+    ]
+    namespace_keys = [
+        f"METRIC#WIKI_NAMESPACE#WIKI#{wiki}#NS#{namespace}"
+        for namespace in NAMESPACES
+    ]
+
+    exact_metric_keys = [
+        wiki_activity_key,
+        bot_true_key,
+        bot_false_key,
+        *change_type_keys,
+        *namespace_keys,
+    ]
+
+    exact_counts_future = _submit_with_context(
+        DYNAMODB_READ_EXECUTOR,
+        _batch_get_metric_counts,
+        exact_metric_keys,
         window_key,
     )
 
+    top_pages_prefix = f"{window_key}#WIKI#{wiki}#"
+    top_pages_futures = [
+        _submit_with_context(
+            DYNAMODB_READ_EXECUTOR,
+            _query_top_pages_shard,
+            shard_id,
+            top_pages_prefix,
+        )
+        for shard_id in range(TOP_METRIC_SHARD_COUNT)
+    ]
+
+    counts = exact_counts_future.result()
+    top_pages = _collect_top_pages(top_pages_futures)
+
+    bot_count = counts.get(bot_true_key, 0)
+    human_count = counts.get(bot_false_key, 0)
     total = bot_count + human_count
     bot_ratio = round(bot_count / total, 4) if total > 0 else 0.0
 
-    return bot_count, human_count, bot_ratio
+    change_types = {
+        change_type: count
+        for change_type in CHANGE_TYPES
+        if (
+            count := counts.get(
+                f"METRIC#WIKI_CHANGE_TYPE#WIKI#{wiki}#TYPE#{change_type}",
+                0,
+            )
+        ) > 0
+    }
 
+    namespace_distribution = {
+        str(namespace): count
+        for namespace in NAMESPACES
+        if (
+            count := counts.get(
+                f"METRIC#WIKI_NAMESPACE#WIKI#{wiki}#NS#{namespace}",
+                0,
+            )
+        ) > 0
+    }
 
-def read_wiki_change_types(wiki: str, window_key: str) -> Dict[str, int]:
-    result: Dict[str, int] = {}
+    duration_ms = round(
+        (time.perf_counter() - started_at) * 1000,
+        2,
+    )
 
-    for change_type in CHANGE_TYPES:
-        metric_key = f"METRIC#WIKI_CHANGE_TYPE#WIKI#{wiki}#TYPE#{change_type}"
-        count = get_metric_count(metric_key, window_key)
-
-        if count > 0:
-            result[change_type] = count
-
-    return result
-
-
-def read_wiki_namespace_distribution(wiki: str, window_key: str) -> Dict[str, int]:
-    result: Dict[str, int] = {}
-
-    for namespace in NAMESPACES:
-        metric_key = f"METRIC#WIKI_NAMESPACE#WIKI#{wiki}#NS#{namespace}"
-        count = get_metric_count(metric_key, window_key)
-
-        if count > 0:
-            result[str(namespace)] = count
-
-    return result
-
-
-def read_wiki_activity(wiki: str, window_key: str) -> int:
-    metric_key = f"METRIC#WIKI_ACTIVITY#WIKI#{wiki}"
-    return get_metric_count(metric_key, window_key)
+    return (
+        {
+            "current_minute_events_so_far": counts.get(
+                wiki_activity_key,
+                0,
+            ),
+            "bot_count": bot_count,
+            "human_count": human_count,
+            "bot_ratio": bot_ratio,
+            "change_types": change_types,
+            "namespace_distribution": namespace_distribution,
+            "top_pages": top_pages,
+        },
+        duration_ms,
+    )
 
 
 # ---------------------------------------------------------------------------
 # DynamoDB read helpers — websocket_connections
 # ---------------------------------------------------------------------------
 
+
 def scan_connections() -> List[Dict[str, Any]]:
+    """
+    Scan active WebSocket connections.
+
+    This keeps the current table design intact, but transfers only the three
+    attributes required by the broadcaster. The later 1,000+ connection design
+    should replace Scan with topic/shard Query operations.
+    """
     items: List[Dict[str, Any]] = []
     exclusive_start_key = None
     now_epoch = int(datetime.now(timezone.utc).timestamp())
 
     while True:
-        kwargs = {}
+        kwargs: Dict[str, Any] = {
+            "ProjectionExpression": "#cid, #topics, #ttl",
+            "ExpressionAttributeNames": {
+                "#cid": "connection_id",
+                "#topics": "topics",
+                "#ttl": "ttl",
+            },
+        }
 
         if exclusive_start_key:
             kwargs["ExclusiveStartKey"] = exclusive_start_key
 
         response = connections_table.scan(**kwargs)
-        batch_items = response.get("Items", [])
 
-        for item in batch_items:
+        for item in response.get("Items", []):
             ttl = item.get("ttl")
 
             if ttl is not None and to_int(ttl) < now_epoch:
@@ -713,6 +1217,7 @@ def scan_connections() -> List[Dict[str, Any]]:
                 items.append(item)
 
         exclusive_start_key = response.get("LastEvaluatedKey")
+
         if not exclusive_start_key:
             break
 
@@ -723,25 +1228,31 @@ def get_connection_topics(connection: Dict[str, Any]) -> List[str]:
     topics = connection.get("topics")
 
     if isinstance(topics, list) and topics:
-        return [str(topic) for topic in topics if topic]
+        # Preserve order while removing duplicate subscriptions.
+        return list(
+            dict.fromkeys(
+                str(topic)
+                for topic in topics
+                if topic
+            )
+        )
 
-    # Connect handler stores ["global"] by default.
-    # If the attribute is unexpectedly missing, keep the connection useful
-    # instead of silently starving it.
     return ["global"]
 
 
 def index_connections_by_topic(
-    connections: List[Dict[str, Any]]
-) -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
+    connections: List[Dict[str, Any]],
+) -> Tuple[
+    List[Dict[str, Any]],
+    Dict[str, List[Dict[str, Any]]],
+    List[Dict[str, Any]],
+]:
     global_connections: List[Dict[str, Any]] = []
     wiki_connections: Dict[str, List[Dict[str, Any]]] = {}
     top_pages_connections: List[Dict[str, Any]] = []
 
     for connection in connections:
-        topics = get_connection_topics(connection)
-
-        for topic in topics:
+        for topic in get_connection_topics(connection):
             if topic == "global":
                 global_connections.append(connection)
 
@@ -750,12 +1261,19 @@ def index_connections_by_topic(
 
                 if wiki:
                     normalized_topic = f"wiki:{wiki}"
-                    wiki_connections.setdefault(normalized_topic, []).append(connection)
+                    wiki_connections.setdefault(
+                        normalized_topic,
+                        [],
+                    ).append(connection)
 
             elif topic == "top_pages" and ENABLE_TOP_PAGES_TOPIC:
                 top_pages_connections.append(connection)
 
-    return global_connections, wiki_connections, top_pages_connections
+    return (
+        global_connections,
+        wiki_connections,
+        top_pages_connections,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +1414,7 @@ def build_top_pages_message(
 # WebSocket push
 # ---------------------------------------------------------------------------
 
+
 def is_gone_exception(error: ClientError) -> bool:
     error_code = error.response.get("Error", {}).get("Code")
     status_code = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
@@ -903,181 +1422,270 @@ def is_gone_exception(error: ClientError) -> bool:
     return error_code in {"GoneException", "Gone"} or status_code == 410
 
 
-def delete_connection(connection_id: str) -> None:
-    connections_table.delete_item(
+def _delete_connection_worker(connection_id: str) -> None:
+    dynamodb_client.delete_item(
+        TableName=CONNECTIONS_TABLE_NAME,
         Key={
-            "connection_id": connection_id,
-        }
+            "connection_id": {"S": connection_id},
+        },
     )
 
-    
 
-def post_to_connection(
+def delete_connections_batch(connection_ids: List[str]) -> float:
+    """
+    Delete stale connections concurrently with the low-level DynamoDB client.
+
+    This keeps the existing dynamodb:DeleteItem IAM permission; it does not
+    require dynamodb:BatchWriteItem.
+    """
+    unique_connection_ids = list(dict.fromkeys(connection_ids))
+
+    if not unique_connection_ids:
+        return 0.0
+
+    started_at = time.perf_counter()
+    futures = [
+        _submit_with_context(
+            DYNAMODB_READ_EXECUTOR,
+            _delete_connection_worker,
+            connection_id,
+        )
+        for connection_id in unique_connection_ids
+    ]
+
+    first_error: Optional[Exception] = None
+
+    for future in as_completed(futures):
+        try:
+            future.result()
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+
+    duration_ms = round(
+        (time.perf_counter() - started_at) * 1000,
+        2,
+    )
+
+    gone_cleanup_duration_ms.record(
+        duration_ms,
+        {
+            "environment": ENVIRONMENT,
+        },
+    )
+
+    if first_error is not None:
+        raise first_error
+
+    return duration_ms
+
+
+def _post_to_connection_worker(
     connection_id: str,
-    message: Dict[str, Any],
-    aws_request_id: Optional[str] = None,
-    topic: Optional[str] = None,
-) -> str:
-    normalized_topic = topic or str(message.get("topic", "unknown"))
-    start_time = time.perf_counter()
+    prepared_message: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Execute exactly one API Gateway network call.
 
-    # Existing metrics keep their current raw topic label to avoid breaking
-    # existing dashboards. The new freshness histogram uses a lower-cardinality
-    # topic_type label.
-    metric_attrs = {
-        "topic": normalized_topic,
-    }
-
-    freshness_metric_attrs = {
-        "environment": ENVIRONMENT,
-        "topic_type": topic_type_from_topic(normalized_topic),
-    }
-
-    latest_event_timestamp_ms = to_epoch_ms(message.get("latest_event_timestamp_ms"))
-    oldest_event_timestamp_ms = to_epoch_ms(message.get("oldest_event_timestamp_ms"))
-
+    This function intentionally does not update shared counters, OpenTelemetry
+    metrics, logs, or DynamoDB. It returns an immutable result for the main
+    thread to aggregate safely.
+    """
+    started_at = time.perf_counter()
     server_send_attempt_at_ms = epoch_ms_now()
-    outbound_message = dict(message)
+
+    outbound_message = dict(prepared_message)
     outbound_message["server_send_attempt_at_ms"] = server_send_attempt_at_ms
 
     payload = json.dumps(
-        json_safe(outbound_message),
+        outbound_message,
         separators=(",", ":"),
     ).encode("utf-8")
 
-    with tracer.start_as_current_span("broadcaster.post_to_connection") as span:
-        span.set_attribute("messaging.destination.name", normalized_topic)
-        span.set_attribute("aws.service", "apigatewaymanagementapi")
-        span.set_attribute("rpc.method", "post_to_connection")
-        span.set_attribute("websocket.topic_type", freshness_metric_attrs["topic_type"])
-        span.set_attribute("websocket.server_send_attempt_at_ms", server_send_attempt_at_ms)
+    try:
+        instrumentation_context = (
+            nullcontext()
+            if TRACE_POST_TO_CONNECTION_CALLS
+            else suppress_instrumentation()
+        )
 
-        if latest_event_timestamp_ms is not None:
-            span.set_attribute("events.latest_event_timestamp_ms", latest_event_timestamp_ms)
-
-        if oldest_event_timestamp_ms is not None:
-            span.set_attribute("events.oldest_event_timestamp_ms", oldest_event_timestamp_ms)
-
-        try:
+        with instrumentation_context:
             apigw_management.post_to_connection(
                 ConnectionId=connection_id,
                 Data=payload,
             )
 
-            server_post_success_at_ms = epoch_ms_now()
-            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        return {
+            "connection_id": connection_id,
+            "status": "sent",
+            "duration_ms": round(
+                (time.perf_counter() - started_at) * 1000,
+                2,
+            ),
+            "server_send_attempt_at_ms": server_send_attempt_at_ms,
+            "server_post_success_at_ms": epoch_ms_now(),
+            "error": None,
+            "error_type": None,
+            "error_code": None,
+            "http_status": 200,
+        }
 
-            websocket_post_success_total.add(1, metric_attrs)
-            websocket_messages_sent_total.add(1, metric_attrs)
-            websocket_post_duration_ms.record(duration_ms, metric_attrs)
+    except ClientError as error:
+        response = error.response or {}
+        error_code = response.get("Error", {}).get("Code")
+        http_status = response.get(
+            "ResponseMetadata",
+            {},
+        ).get("HTTPStatusCode")
 
-            if latest_event_timestamp_ms is not None:
-                latency_ms = server_post_success_at_ms - latest_event_timestamp_ms
+        return {
+            "connection_id": connection_id,
+            "status": "gone" if is_gone_exception(error) else "error",
+            "duration_ms": round(
+                (time.perf_counter() - started_at) * 1000,
+                2,
+            ),
+            "server_send_attempt_at_ms": server_send_attempt_at_ms,
+            "server_post_success_at_ms": None,
+            "error": error,
+            "error_type": type(error).__name__,
+            "error_code": error_code,
+            "http_status": http_status,
+        }
 
-                if latency_ms >= 0:
-                    event_to_dashboard_latency_ms.record(
-                        latency_ms,
-                        freshness_metric_attrs,
-                    )
-                    span.set_attribute("freshness.event_to_dashboard_latency_ms", latency_ms)
-                else:
-                    span.set_attribute("freshness.negative_latency_detected", True)
-                    log_json(
-                        "WARNING",
-                        "freshness_negative_latency_skipped",
-                        aws_request_id=aws_request_id,
-                        topic=normalized_topic,
-                        latest_event_timestamp_ms=latest_event_timestamp_ms,
-                        server_post_success_at_ms=server_post_success_at_ms,
-                        latency_ms=latency_ms,
-                    )
+    except Exception as error:
+        return {
+            "connection_id": connection_id,
+            "status": "exception",
+            "duration_ms": round(
+                (time.perf_counter() - started_at) * 1000,
+                2,
+            ),
+            "server_send_attempt_at_ms": server_send_attempt_at_ms,
+            "server_post_success_at_ms": None,
+            "error": error,
+            "error_type": type(error).__name__,
+            "error_code": None,
+            "http_status": None,
+        }
 
-            if oldest_event_timestamp_ms is not None:
-                oldest_latency_ms = server_post_success_at_ms - oldest_event_timestamp_ms
 
-                if oldest_latency_ms >= 0:
-                    oldest_event_to_dashboard_latency_ms.record(
-                        oldest_latency_ms,
-                        freshness_metric_attrs,
-                    )
-                    span.set_attribute(
-                        "freshness.oldest_event_to_dashboard_latency_ms",
-                        oldest_latency_ms,
-                    )
+def _record_post_result(
+    result: Dict[str, Any],
+    normalized_topic: str,
+    latest_event_timestamp_ms: Optional[int],
+    oldest_event_timestamp_ms: Optional[int],
+    aws_request_id: Optional[str],
+) -> None:
+    metric_attrs = {
+        "topic": normalized_topic,
+    }
+    freshness_metric_attrs = {
+        "environment": ENVIRONMENT,
+        "topic_type": topic_type_from_topic(normalized_topic),
+    }
 
-            span.set_attribute("websocket.post.result", "sent")
-            span.set_attribute("websocket.server_post_success_at_ms", server_post_success_at_ms)
-            span.set_status(Status(StatusCode.OK))
+    duration_ms = float(result.get("duration_ms") or 0.0)
+    websocket_post_duration_ms.record(
+        duration_ms,
+        metric_attrs,
+    )
 
-            return "sent"
+    status = result.get("status")
 
-        except ClientError as error:
-            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-            websocket_post_duration_ms.record(duration_ms, metric_attrs)
+    if status == "sent":
+        websocket_post_success_total.add(
+            1,
+            metric_attrs,
+        )
+        websocket_messages_sent_total.add(
+            1,
+            metric_attrs,
+        )
 
-            if is_gone_exception(error):
-                websocket_connection_gone_total.add(1, metric_attrs)
+        server_post_success_at_ms = to_epoch_ms(
+            result.get("server_post_success_at_ms")
+        )
 
-                span.set_attribute("websocket.post.result", "gone")
-                span.set_status(Status(StatusCode.OK))
+        if server_post_success_at_ms is None:
+            return
 
-                log_json(
-                    "INFO",
-                    "gone_connection_cleaned",
-                    aws_request_id=aws_request_id,
-                    connection_id=connection_id,
-                    topic=normalized_topic,
+        if latest_event_timestamp_ms is not None:
+            latency_ms = (
+                server_post_success_at_ms
+                - latest_event_timestamp_ms
+            )
+
+            if latency_ms >= 0:
+                event_to_dashboard_latency_ms.record(
+                    latency_ms,
+                    freshness_metric_attrs,
                 )
-                delete_connection(connection_id)
-                return "gone"
+            else:
+                log_json(
+                    "WARNING",
+                    "freshness_negative_latency_skipped",
+                    aws_request_id=aws_request_id,
+                    topic=normalized_topic,
+                    latest_event_timestamp_ms=latest_event_timestamp_ms,
+                    server_post_success_at_ms=server_post_success_at_ms,
+                    latency_ms=latency_ms,
+                )
 
-            failure_attrs = {
-                **metric_attrs,
-                "error_type": type(error).__name__,
-            }
-
-            websocket_post_failure_total.add(1, failure_attrs)
-
-            span.record_exception(error)
-            span.set_attribute("websocket.post.result", "error")
-            span.set_attribute("error.type", type(error).__name__)
-            span.set_status(Status(StatusCode.ERROR, str(error)))
-
-            log_exception(
-                "websocket_post_failed",
-                aws_request_id=aws_request_id,
-                connection_id=connection_id,
-                topic=normalized_topic,
-                error_type=type(error).__name__,
-                error_message=str(error),
+        if oldest_event_timestamp_ms is not None:
+            oldest_latency_ms = (
+                server_post_success_at_ms
+                - oldest_event_timestamp_ms
             )
-            return "error"
 
-        except Exception as error:
-            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-            websocket_post_duration_ms.record(duration_ms, metric_attrs)
+            if oldest_latency_ms >= 0:
+                oldest_event_to_dashboard_latency_ms.record(
+                    oldest_latency_ms,
+                    freshness_metric_attrs,
+                )
 
-            failure_attrs = {
-                **metric_attrs,
-                "error_type": type(error).__name__,
-            }
+        return
 
-            websocket_post_failure_total.add(1, failure_attrs)
+    if status == "gone":
+        websocket_connection_gone_total.add(
+            1,
+            metric_attrs,
+        )
 
-            span.record_exception(error)
-            span.set_attribute("websocket.post.result", "exception")
-            span.set_attribute("error.type", type(error).__name__)
-            span.set_status(Status(StatusCode.ERROR, str(error)))
+        log_json(
+            "INFO",
+            "gone_connection_detected",
+            aws_request_id=aws_request_id,
+            connection_id=result.get("connection_id"),
+            topic=normalized_topic,
+            error_code=result.get("error_code"),
+            http_status=result.get("http_status"),
+        )
+        return
 
-            log_exception(
-                "websocket_post_failed",
-                aws_request_id=aws_request_id,
-                connection_id=connection_id,
-                topic=normalized_topic,
-                error_type=type(error).__name__,
-                error_message=str(error),
-            )
-            raise
+    failure_attrs = {
+        **metric_attrs,
+        "error_type": str(
+            result.get("error_type")
+            or "UnknownError"
+        ),
+    }
+    websocket_post_failure_total.add(
+        1,
+        failure_attrs,
+    )
+
+    log_json(
+        "ERROR",
+        "websocket_post_failed",
+        aws_request_id=aws_request_id,
+        connection_id=result.get("connection_id"),
+        topic=normalized_topic,
+        error_type=result.get("error_type"),
+        error_code=result.get("error_code"),
+        http_status=result.get("http_status"),
+        error_message=str(result.get("error")),
+    )
 
 
 def send_message_to_connections(
@@ -1085,35 +1693,203 @@ def send_message_to_connections(
     message: Dict[str, Any],
     aws_request_id: Optional[str] = None,
     topic: Optional[str] = None,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
+    """
+    Fan out one payload with bounded parallelism.
+
+    All API Gateway calls run in POST_EXECUTOR. The main thread aggregates
+    metrics and performs stale-connection cleanup only after the network calls
+    finish.
+    """
+    normalized_topic = topic or str(
+        message.get("topic", "unknown")
+    )
+    prepared_message = json_safe(message)
+
+    connection_ids = list(
+        dict.fromkeys(
+            str(connection.get("connection_id"))
+            for connection in connections
+            if connection.get("connection_id")
+        )
+    )
+
+    attempted = len(connection_ids)
+
+    if attempted == 0:
+        return {
+            "sent": 0,
+            "gone": 0,
+            "errors": 0,
+            "gone_connection_ids": [],
+            "fanout_duration_ms": 0.0,
+            "gone_cleanup_duration_ms": 0.0,
+        }
+
+    fanout_batch_size.record(
+        attempted,
+        {
+            "environment": ENVIRONMENT,
+            "topic_type": topic_type_from_topic(normalized_topic),
+        },
+    )
+
+    latest_event_timestamp_ms = to_epoch_ms(
+        message.get("latest_event_timestamp_ms")
+    )
+    oldest_event_timestamp_ms = to_epoch_ms(
+        message.get("oldest_event_timestamp_ms")
+    )
+
     sent = 0
-    gone = 0
     errors = 0
+    gone_connection_ids: List[str] = []
+    fatal_exceptions: List[BaseException] = []
+    started_at = time.perf_counter()
 
-    for connection in connections:
-        connection_id = connection.get("connection_id")
-
-        if not connection_id:
-            continue
-
-        result = post_to_connection(
-            connection_id=connection_id,
-            message=message,
-            aws_request_id=aws_request_id,
-            topic=topic or str(message.get("topic", "unknown")),
+    with tracer.start_as_current_span(
+        "broadcaster.fanout",
+    ) as span:
+        span.set_attribute(
+            "messaging.destination.name",
+            normalized_topic,
+        )
+        span.set_attribute(
+            "fanout.connections_attempted",
+            attempted,
+        )
+        span.set_attribute(
+            "fanout.max_workers",
+            MAX_POST_WORKERS,
         )
 
-        if result == "sent":
-            sent += 1
-        elif result == "gone":
-            gone += 1
+        futures = [
+            _submit_with_context(
+                POST_EXECUTOR,
+                _post_to_connection_worker,
+                connection_id,
+                prepared_message,
+            )
+            for connection_id in connection_ids
+        ]
+
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except BaseException as error:
+                result = {
+                    "connection_id": None,
+                    "status": "exception",
+                    "duration_ms": 0.0,
+                    "server_post_success_at_ms": None,
+                    "error": error,
+                    "error_type": type(error).__name__,
+                    "error_code": None,
+                    "http_status": None,
+                }
+
+            _record_post_result(
+                result=result,
+                normalized_topic=normalized_topic,
+                latest_event_timestamp_ms=latest_event_timestamp_ms,
+                oldest_event_timestamp_ms=oldest_event_timestamp_ms,
+                aws_request_id=aws_request_id,
+            )
+
+            status = result.get("status")
+
+            if status == "sent":
+                sent += 1
+            elif status == "gone":
+                gone_connection_ids.append(
+                    str(result["connection_id"])
+                )
+            else:
+                errors += 1
+
+                if status == "exception":
+                    error = result.get("error")
+
+                    if isinstance(error, BaseException):
+                        fatal_exceptions.append(error)
+                    else:
+                        fatal_exceptions.append(
+                            RuntimeError(str(error))
+                        )
+
+        fanout_only_duration_ms = round(
+            (time.perf_counter() - started_at) * 1000,
+            2,
+        )
+
+        fanout_duration_ms.record(
+            fanout_only_duration_ms,
+            {
+                "environment": ENVIRONMENT,
+                "topic_type": topic_type_from_topic(normalized_topic),
+            },
+        )
+
+        cleanup_duration_ms = delete_connections_batch(
+            gone_connection_ids,
+        )
+
+        span.set_attribute(
+            "fanout.connections_sent",
+            sent,
+        )
+        span.set_attribute(
+            "fanout.connections_gone",
+            len(gone_connection_ids),
+        )
+        span.set_attribute(
+            "fanout.connections_failed",
+            errors,
+        )
+        span.set_attribute(
+            "fanout.duration_ms",
+            fanout_only_duration_ms,
+        )
+        span.set_attribute(
+            "fanout.gone_cleanup_duration_ms",
+            cleanup_duration_ms,
+        )
+
+        if fatal_exceptions:
+            span.record_exception(fatal_exceptions[0])
+            span.set_status(
+                Status(
+                    StatusCode.ERROR,
+                    str(fatal_exceptions[0]),
+                )
+            )
         else:
-            errors += 1
+            span.set_status(Status(StatusCode.OK))
+
+    log_json(
+        "INFO",
+        "fanout_completed",
+        aws_request_id=aws_request_id,
+        topic=normalized_topic,
+        attempted=attempted,
+        sent=sent,
+        gone=len(gone_connection_ids),
+        errors=errors,
+        max_post_workers=MAX_POST_WORKERS,
+        fanout_duration_ms=fanout_only_duration_ms,
+        gone_cleanup_duration_ms=cleanup_duration_ms,
+    )
+
+    if fatal_exceptions:
+        raise fatal_exceptions[0]
 
     return {
         "sent": sent,
-        "gone": gone,
+        "gone": len(gone_connection_ids),
         "errors": errors,
+        "gone_connection_ids": gone_connection_ids,
+        "fanout_duration_ms": fanout_only_duration_ms,
+        "gone_cleanup_duration_ms": cleanup_duration_ms,
     }
 
 
@@ -1208,7 +1984,7 @@ def process_aggregation_window(
     connections: List[Dict[str, Any]],
     event_timestamp_bounds: Optional[Dict[str, Optional[int]]] = None,
     aws_request_id: Optional[str] = None,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     start_time = time.perf_counter()
     window_key = normalize_window_key(aggregation_window)
 
@@ -1224,16 +2000,41 @@ def process_aggregation_window(
         event_timestamp_bounds.get("latest_event_timestamp_ms")
     )
 
-    with tracer.start_as_current_span("broadcaster.process_aggregation_window") as span:
-        span.set_attribute("broadcast.aggregation_window", aggregation_window)
-        span.set_attribute("broadcast.broadcast_window", broadcast_window)
-        span.set_attribute("broadcast.connections_scanned", len(connections))
+    with tracer.start_as_current_span(
+        "broadcaster.process_aggregation_window",
+    ) as span:
+        span.set_attribute(
+            "broadcast.aggregation_window",
+            aggregation_window,
+        )
+        span.set_attribute(
+            "broadcast.broadcast_window",
+            broadcast_window,
+        )
+        span.set_attribute(
+            "broadcast.connections_scanned",
+            len(connections),
+        )
+        span.set_attribute(
+            "fanout.max_workers",
+            MAX_POST_WORKERS,
+        )
+        span.set_attribute(
+            "dynamodb.read_workers",
+            DYNAMODB_READ_WORKERS,
+        )
 
         if latest_event_timestamp_ms is not None:
-            span.set_attribute("events.latest_event_timestamp_ms", latest_event_timestamp_ms)
+            span.set_attribute(
+                "events.latest_event_timestamp_ms",
+                latest_event_timestamp_ms,
+            )
 
         if oldest_event_timestamp_ms is not None:
-            span.set_attribute("events.oldest_event_timestamp_ms", oldest_event_timestamp_ms)
+            span.set_attribute(
+                "events.oldest_event_timestamp_ms",
+                oldest_event_timestamp_ms,
+            )
 
         try:
             (
@@ -1243,20 +2044,40 @@ def process_aggregation_window(
                 required_wikis,
             ) = collect_required_topics(connections)
 
-            span.set_attribute("broadcast.global_subscribers", len(global_connections))
-            span.set_attribute("broadcast.top_pages_subscribers", len(top_pages_connections))
-            span.set_attribute("broadcast.wiki_topic_count", len(required_wikis))
+            span.set_attribute(
+                "broadcast.global_subscribers",
+                len(global_connections),
+            )
+            span.set_attribute(
+                "broadcast.top_pages_subscribers",
+                len(top_pages_connections),
+            )
+            span.set_attribute(
+                "broadcast.wiki_topic_count",
+                len(required_wikis),
+            )
 
-            metrics = {
+            metrics: Dict[str, Any] = {
                 "connections_scanned": len(connections),
                 "messages_sent": 0,
                 "gone_connections": 0,
                 "post_errors": 0,
+                "aggregate_reads_duration_ms": 0.0,
+                "payload_build_duration_ms": 0.0,
+                "fanout_duration_ms": 0.0,
+                "gone_cleanup_duration_ms": 0.0,
             }
+            gone_connection_ids: Set[str] = set()
 
-            # Nothing to send.
-            if not global_connections and not wiki_connections and not top_pages_connections:
-                duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            if (
+                not global_connections
+                and not wiki_connections
+                and not top_pages_connections
+            ):
+                duration_ms = round(
+                    (time.perf_counter() - start_time) * 1000,
+                    2,
+                )
 
                 broadcast_duration_ms.record(
                     duration_ms,
@@ -1266,9 +2087,18 @@ def process_aggregation_window(
                     },
                 )
 
-                span.set_attribute("broadcast.result", "skipped")
-                span.set_attribute("broadcast.reason", "no_matching_subscriptions")
-                span.set_attribute("broadcast.duration_ms", duration_ms)
+                span.set_attribute(
+                    "broadcast.result",
+                    "skipped",
+                )
+                span.set_attribute(
+                    "broadcast.reason",
+                    "no_matching_subscriptions",
+                )
+                span.set_attribute(
+                    "broadcast.duration_ms",
+                    duration_ms,
+                )
                 span.set_status(Status(StatusCode.OK))
 
                 log_json(
@@ -1283,93 +2113,199 @@ def process_aggregation_window(
                     duration_ms=duration_ms,
                     **metrics,
                 )
-                return metrics
 
-            # Read top_pages once if it is needed by global message or by top_pages topic.
+                return {
+                    **metrics,
+                    "gone_connection_ids": [],
+                }
+
+            global_snapshot: Optional[Dict[str, Any]] = None
             top_pages: List[Dict[str, Any]] = []
-            top_pages_needed = bool(global_connections) or bool(top_pages_connections)
 
-            if top_pages_needed:
-                top_pages = read_top_pages(window_key)
-
-            # Global message.
-            # The global payload intentionally includes top_pages, as defined in Contract 5.
+            # Global aggregate reads: BatchGet exact counters and run shard
+            # queries concurrently.
             if global_connections:
-                current_minute_events_so_far = read_global_activity(window_key)
-                bot_count, human_count, bot_ratio = read_bot_activity(window_key)
-                change_types = read_change_types(window_key)
-                namespace_distribution = read_namespace_distribution(window_key)
-                top_wikis = read_top_wikis(window_key)
+                global_snapshot, reads_duration_ms = read_global_snapshot(
+                    window_key,
+                )
+                metrics["aggregate_reads_duration_ms"] += reads_duration_ms
 
+                aggregate_reads_duration_ms.record(
+                    reads_duration_ms,
+                    {
+                        "environment": ENVIRONMENT,
+                        "topic_type": "global",
+                    },
+                )
+
+                top_pages = global_snapshot["top_pages"]
+
+                payload_started_at = time.perf_counter()
                 global_message = build_global_message(
                     aggregation_window=aggregation_window,
                     broadcast_window=broadcast_window,
-                    current_minute_events_so_far=current_minute_events_so_far,
-                    bot_count=bot_count,
-                    human_count=human_count,
-                    bot_ratio=bot_ratio,
-                    top_wikis=top_wikis,
-                    change_types=change_types,
-                    namespace_distribution=namespace_distribution,
+                    current_minute_events_so_far=global_snapshot[
+                        "current_minute_events_so_far"
+                    ],
+                    bot_count=global_snapshot["bot_count"],
+                    human_count=global_snapshot["human_count"],
+                    bot_ratio=global_snapshot["bot_ratio"],
+                    top_wikis=global_snapshot["top_wikis"],
+                    change_types=global_snapshot["change_types"],
+                    namespace_distribution=global_snapshot[
+                        "namespace_distribution"
+                    ],
                     top_pages=top_pages,
                     latest_event_timestamp_ms=latest_event_timestamp_ms,
                     oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                 )
+                payload_duration_ms = round(
+                    (time.perf_counter() - payload_started_at) * 1000,
+                    2,
+                )
+                metrics["payload_build_duration_ms"] += payload_duration_ms
+
+                payload_build_duration_ms.record(
+                    payload_duration_ms,
+                    {
+                        "environment": ENVIRONMENT,
+                        "topic_type": "global",
+                    },
+                )
 
                 result = send_message_to_connections(
-                    global_connections,
-                    global_message,
+                    connections=[
+                        connection
+                        for connection in global_connections
+                        if str(connection.get("connection_id"))
+                        not in gone_connection_ids
+                    ],
+                    message=global_message,
                     aws_request_id=aws_request_id,
                     topic="global",
                 )
+
                 metrics["messages_sent"] += result["sent"]
                 metrics["gone_connections"] += result["gone"]
                 metrics["post_errors"] += result["errors"]
+                metrics["fanout_duration_ms"] += result[
+                    "fanout_duration_ms"
+                ]
+                metrics["gone_cleanup_duration_ms"] += result[
+                    "gone_cleanup_duration_ms"
+                ]
+                gone_connection_ids.update(
+                    result["gone_connection_ids"]
+                )
 
-            # Wiki-specific messages.
+            # Wiki topics still execute topic by topic, but every topic now uses
+            # BatchGet and parallel TOP_PAGES shard reads internally.
             for wiki in sorted(required_wikis):
                 topic = f"wiki:{wiki}"
-                subscribers = wiki_connections.get(topic, [])
+                subscribers = [
+                    connection
+                    for connection in wiki_connections.get(topic, [])
+                    if str(connection.get("connection_id"))
+                    not in gone_connection_ids
+                ]
 
                 if not subscribers:
                     continue
 
-                wiki_count = read_wiki_activity(wiki, window_key)
-                wiki_bot_count, wiki_human_count, wiki_bot_ratio = read_wiki_bot_activity(
+                wiki_snapshot, reads_duration_ms = read_wiki_snapshot(
                     wiki,
                     window_key,
                 )
-                wiki_change_types = read_wiki_change_types(wiki, window_key)
-                wiki_namespace_distribution = read_wiki_namespace_distribution(wiki, window_key)
-                wiki_top_pages = read_top_pages_for_wiki(wiki, window_key)
+                metrics["aggregate_reads_duration_ms"] += reads_duration_ms
 
+                aggregate_reads_duration_ms.record(
+                    reads_duration_ms,
+                    {
+                        "environment": ENVIRONMENT,
+                        "topic_type": "wiki",
+                    },
+                )
+
+                payload_started_at = time.perf_counter()
                 wiki_message = build_wiki_message(
                     wiki=wiki,
                     aggregation_window=aggregation_window,
                     broadcast_window=broadcast_window,
-                    current_minute_events_so_far=wiki_count,
-                    bot_count=wiki_bot_count,
-                    human_count=wiki_human_count,
-                    bot_ratio=wiki_bot_ratio,
-                    change_types=wiki_change_types,
-                    namespace_distribution=wiki_namespace_distribution,
-                    top_pages=wiki_top_pages,
+                    current_minute_events_so_far=wiki_snapshot[
+                        "current_minute_events_so_far"
+                    ],
+                    bot_count=wiki_snapshot["bot_count"],
+                    human_count=wiki_snapshot["human_count"],
+                    bot_ratio=wiki_snapshot["bot_ratio"],
+                    change_types=wiki_snapshot["change_types"],
+                    namespace_distribution=wiki_snapshot[
+                        "namespace_distribution"
+                    ],
+                    top_pages=wiki_snapshot["top_pages"],
                     latest_event_timestamp_ms=latest_event_timestamp_ms,
                     oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                 )
+                payload_duration_ms = round(
+                    (time.perf_counter() - payload_started_at) * 1000,
+                    2,
+                )
+                metrics["payload_build_duration_ms"] += payload_duration_ms
+
+                payload_build_duration_ms.record(
+                    payload_duration_ms,
+                    {
+                        "environment": ENVIRONMENT,
+                        "topic_type": "wiki",
+                    },
+                )
 
                 result = send_message_to_connections(
-                    subscribers,
-                    wiki_message,
+                    connections=subscribers,
+                    message=wiki_message,
                     aws_request_id=aws_request_id,
                     topic=topic,
                 )
+
                 metrics["messages_sent"] += result["sent"]
                 metrics["gone_connections"] += result["gone"]
                 metrics["post_errors"] += result["errors"]
+                metrics["fanout_duration_ms"] += result[
+                    "fanout_duration_ms"
+                ]
+                metrics["gone_cleanup_duration_ms"] += result[
+                    "gone_cleanup_duration_ms"
+                ]
+                gone_connection_ids.update(
+                    result["gone_connection_ids"]
+                )
 
-            # Optional top_pages standalone topic.
-            if top_pages_connections:
+            # Standalone top_pages reuses global TOP_PAGES reads when global is
+            # subscribed. Otherwise it runs only the TOP_PAGES shard queries.
+            remaining_top_pages_connections = [
+                connection
+                for connection in top_pages_connections
+                if str(connection.get("connection_id"))
+                not in gone_connection_ids
+            ]
+
+            if remaining_top_pages_connections:
+                if global_snapshot is None:
+                    top_pages, reads_duration_ms = read_top_pages_snapshot(
+                        f"{window_key}#",
+                    )
+                    metrics[
+                        "aggregate_reads_duration_ms"
+                    ] += reads_duration_ms
+
+                    aggregate_reads_duration_ms.record(
+                        reads_duration_ms,
+                        {
+                            "environment": ENVIRONMENT,
+                            "topic_type": "top_pages",
+                        },
+                    )
+
+                payload_started_at = time.perf_counter()
                 top_pages_message = build_top_pages_message(
                     aggregation_window=aggregation_window,
                     broadcast_window=broadcast_window,
@@ -1377,18 +2313,44 @@ def process_aggregation_window(
                     latest_event_timestamp_ms=latest_event_timestamp_ms,
                     oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                 )
+                payload_duration_ms = round(
+                    (time.perf_counter() - payload_started_at) * 1000,
+                    2,
+                )
+                metrics["payload_build_duration_ms"] += payload_duration_ms
+
+                payload_build_duration_ms.record(
+                    payload_duration_ms,
+                    {
+                        "environment": ENVIRONMENT,
+                        "topic_type": "top_pages",
+                    },
+                )
 
                 result = send_message_to_connections(
-                    top_pages_connections,
-                    top_pages_message,
+                    connections=remaining_top_pages_connections,
+                    message=top_pages_message,
                     aws_request_id=aws_request_id,
                     topic="top_pages",
                 )
+
                 metrics["messages_sent"] += result["sent"]
                 metrics["gone_connections"] += result["gone"]
                 metrics["post_errors"] += result["errors"]
+                metrics["fanout_duration_ms"] += result[
+                    "fanout_duration_ms"
+                ]
+                metrics["gone_cleanup_duration_ms"] += result[
+                    "gone_cleanup_duration_ms"
+                ]
+                gone_connection_ids.update(
+                    result["gone_connection_ids"]
+                )
 
-            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            duration_ms = round(
+                (time.perf_counter() - start_time) * 1000,
+                2,
+            )
 
             broadcast_completed_total.add(
                 1,
@@ -1405,11 +2367,42 @@ def process_aggregation_window(
                 },
             )
 
-            span.set_attribute("broadcast.result", "completed")
-            span.set_attribute("broadcast.duration_ms", duration_ms)
-            span.set_attribute("broadcast.messages_sent", metrics["messages_sent"])
-            span.set_attribute("broadcast.gone_connections", metrics["gone_connections"])
-            span.set_attribute("broadcast.post_errors", metrics["post_errors"])
+            span.set_attribute(
+                "broadcast.result",
+                "completed",
+            )
+            span.set_attribute(
+                "broadcast.duration_ms",
+                duration_ms,
+            )
+            span.set_attribute(
+                "broadcast.messages_sent",
+                metrics["messages_sent"],
+            )
+            span.set_attribute(
+                "broadcast.gone_connections",
+                metrics["gone_connections"],
+            )
+            span.set_attribute(
+                "broadcast.post_errors",
+                metrics["post_errors"],
+            )
+            span.set_attribute(
+                "broadcast.aggregate_reads_duration_ms",
+                metrics["aggregate_reads_duration_ms"],
+            )
+            span.set_attribute(
+                "broadcast.payload_build_duration_ms",
+                metrics["payload_build_duration_ms"],
+            )
+            span.set_attribute(
+                "broadcast.fanout_duration_ms",
+                metrics["fanout_duration_ms"],
+            )
+            span.set_attribute(
+                "broadcast.gone_cleanup_duration_ms",
+                metrics["gone_cleanup_duration_ms"],
+            )
             span.set_status(Status(StatusCode.OK))
 
             log_json(
@@ -1419,20 +2412,33 @@ def process_aggregation_window(
                 aggregation_window=aggregation_window,
                 broadcast_window=broadcast_window,
                 duration_ms=duration_ms,
+                max_post_workers=MAX_POST_WORKERS,
+                dynamodb_read_workers=DYNAMODB_READ_WORKERS,
                 **metrics,
             )
 
-            return metrics
+            return {
+                **metrics,
+                "gone_connection_ids": list(
+                    gone_connection_ids
+                ),
+            }
 
         except Exception as error:
-            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            duration_ms = round(
+                (time.perf_counter() - start_time) * 1000,
+                2,
+            )
 
             failure_attrs = {
                 **metric_base_attrs,
                 "error_type": type(error).__name__,
             }
 
-            broadcast_failed_total.add(1, failure_attrs)
+            broadcast_failed_total.add(
+                1,
+                failure_attrs,
+            )
             broadcast_duration_ms.record(
                 duration_ms,
                 {
@@ -1442,51 +2448,95 @@ def process_aggregation_window(
             )
 
             span.record_exception(error)
-            span.set_attribute("broadcast.result", "failed")
-            span.set_attribute("broadcast.duration_ms", duration_ms)
-            span.set_attribute("error.type", type(error).__name__)
-            span.set_status(Status(StatusCode.ERROR, str(error)))
+            span.set_attribute(
+                "broadcast.result",
+                "failed",
+            )
+            span.set_attribute(
+                "broadcast.duration_ms",
+                duration_ms,
+            )
+            span.set_attribute(
+                "error.type",
+                type(error).__name__,
+            )
+            span.set_status(
+                Status(
+                    StatusCode.ERROR,
+                    str(error),
+                )
+            )
 
             raise
 
 
-def process_sqs_record(record: Dict[str, Any], aws_request_id: Optional[str] = None) -> None:
-    with tracer.start_as_current_span("broadcaster.process_sqs_record") as span:
+def process_sqs_record(
+    record: Dict[str, Any],
+    aws_request_id: Optional[str] = None,
+) -> None:
+    with tracer.start_as_current_span(
+        "broadcaster.process_sqs_record",
+    ) as span:
         message_id = record.get("messageId")
+
         if message_id:
-            span.set_attribute("messaging.message.id", str(message_id))
+            span.set_attribute(
+                "messaging.message.id",
+                str(message_id),
+            )
 
-        traceparent = get_sqs_message_attribute(record, "traceparent")
-        if traceparent:
-            span.set_attribute("otel.traceparent.received", True)
-        else:
-            span.set_attribute("otel.traceparent.received", False)
+        traceparent = get_sqs_message_attribute(
+            record,
+            "traceparent",
+        )
+        span.set_attribute(
+            "otel.traceparent.received",
+            bool(traceparent),
+        )
 
-        message = parse_sqs_body(record, aws_request_id=aws_request_id)
+        message = parse_sqs_body(
+            record,
+            aws_request_id=aws_request_id,
+        )
 
-        # Malformed messages are skipped, not retried forever.
         if message is None:
-            span.set_attribute("sqs.record.result", "skipped")
+            span.set_attribute(
+                "sqs.record.result",
+                "skipped",
+            )
             span.set_status(Status(StatusCode.OK))
             return
 
         broadcast_window = message["broadcast_window"]
         aggregation_windows = message["aggregation_windows"]
-        bounds_by_window = message.get("event_timestamp_bounds_by_window")
+        bounds_by_window = message.get(
+            "event_timestamp_bounds_by_window"
+        )
         timestamp_bounds_window_count = (
             len(bounds_by_window)
             if isinstance(bounds_by_window, dict)
             else 0
         )
 
-        span.set_attribute("broadcast.broadcast_window", str(broadcast_window))
-        span.set_attribute("broadcast.aggregation_window_count", len(aggregation_windows))
+        span.set_attribute(
+            "broadcast.broadcast_window",
+            str(broadcast_window),
+        )
+        span.set_attribute(
+            "broadcast.aggregation_window_count",
+            len(aggregation_windows),
+        )
         span.set_attribute(
             "events.timestamp_bounds_window_count",
             timestamp_bounds_window_count,
         )
 
+        scan_started_at = time.perf_counter()
         connections = scan_connections()
+        scan_duration_ms = round(
+            (time.perf_counter() - scan_started_at) * 1000,
+            2,
+        )
 
         active_connections_scanned.record(
             len(connections),
@@ -1494,6 +2544,18 @@ def process_sqs_record(record: Dict[str, Any], aws_request_id: Optional[str] = N
                 "environment": ENVIRONMENT,
                 "source": "websocket_connections",
             },
+        )
+        connections_scan_duration_ms.record(
+            scan_duration_ms,
+            {
+                "environment": ENVIRONMENT,
+                "source": "websocket_connections",
+            },
+        )
+
+        span.set_attribute(
+            "connections.scan_duration_ms",
+            scan_duration_ms,
         )
 
         log_json(
@@ -1505,16 +2567,23 @@ def process_sqs_record(record: Dict[str, Any], aws_request_id: Optional[str] = N
             aggregation_window_count=len(aggregation_windows),
             timestamp_bounds_window_count=timestamp_bounds_window_count,
             connections_scanned=len(connections),
+            connections_scan_duration_ms=scan_duration_ms,
+            max_post_workers=MAX_POST_WORKERS,
+            dynamodb_read_workers=DYNAMODB_READ_WORKERS,
         )
 
         for aggregation_window in aggregation_windows:
-            aggregation_window_text = str(aggregation_window)
-            event_timestamp_bounds = get_event_timestamp_bounds_for_window(
-                message=message,
-                aggregation_window=aggregation_window_text,
+            aggregation_window_text = str(
+                aggregation_window
+            )
+            event_timestamp_bounds = (
+                get_event_timestamp_bounds_for_window(
+                    message=message,
+                    aggregation_window=aggregation_window_text,
+                )
             )
 
-            process_aggregation_window(
+            result = process_aggregation_window(
                 aggregation_window=aggregation_window_text,
                 broadcast_window=str(broadcast_window),
                 connections=connections,
@@ -1522,7 +2591,22 @@ def process_sqs_record(record: Dict[str, Any], aws_request_id: Optional[str] = N
                 aws_request_id=aws_request_id,
             )
 
-        span.set_attribute("sqs.record.result", "processed")
+            gone_ids = set(
+                result.get("gone_connection_ids", [])
+            )
+
+            if gone_ids:
+                connections = [
+                    connection
+                    for connection in connections
+                    if str(connection.get("connection_id"))
+                    not in gone_ids
+                ]
+
+        span.set_attribute(
+            "sqs.record.result",
+            "processed",
+        )
         span.set_status(Status(StatusCode.OK))
 
 
