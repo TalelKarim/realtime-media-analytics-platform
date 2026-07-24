@@ -13,8 +13,8 @@ module "apigw_websocket" {
   data_trace_enabled           = true
   detailed_metrics_enabled     = true
 
-  throttling_rate_limit  = 1000
-  throttling_burst_limit = 500
+  throttling_rate_limit  = 2000
+  throttling_burst_limit = 1000
 
   routes = {
     "$connect" = {
