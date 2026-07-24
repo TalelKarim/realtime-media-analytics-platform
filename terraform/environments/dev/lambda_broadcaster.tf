@@ -71,6 +71,14 @@ module "lambda_broadcaster" {
     GRAFANA_OTLP_ENDPOINT      = var.grafana_otlp_endpoint
     GRAFANA_OTLP_AUTHORIZATION = local.grafana_otlp_authorization
 
+
+    MAX_POST_WORKERS              = "40"
+    APIGW_MAX_POOL_CONNECTIONS    = "48"
+    DYNAMODB_READ_WORKERS         = "24"
+    DYNAMODB_MAX_POOL_CONNECTIONS = "32"
+
+    TRACE_POST_TO_CONNECTION_CALLS = "false"
+
     ENVIRONMENT                 = var.environment
     AGGREGATES_TABLE_NAME       = module.dynamodb.realtime_aggregates_table_name
     CONNECTIONS_TABLE_NAME      = module.dynamodb.websocket_connections_table_name
