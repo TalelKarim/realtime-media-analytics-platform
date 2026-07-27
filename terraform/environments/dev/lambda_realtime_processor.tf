@@ -27,8 +27,8 @@ module "realtime_processor_lambda" {
 
   role_arn = module.iam.realtime_processor_role_arn
 
-  memory_size = 256
-  timeout     = 30
+  memory_size = 1536
+  timeout     = 60
 
   # Keep the existing shared Python dependencies layer and add the local
   # OpenTelemetry Collector Lambda Extension.
