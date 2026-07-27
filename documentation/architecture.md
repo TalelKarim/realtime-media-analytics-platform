@@ -75,92 +75,138 @@ Wikimedia SSE
 
 ### ECS Fargate Collector
 
-Maintains a persistent SSE connection to Wikimedia. Lambda is excluded because it cannot hold an infinite HTTP connection.
+Maintains a persistent SSE connection to Wikimedia. Lambda is excluded because it cannot hold an indefinite HTTP connection.
 
-The Collector receives the raw Wikimedia JSON object from each SSE `data:` line, filters invalid or canary events, creates a normalized envelope, embeds the original raw event under `raw_event`, batches records, and writes them to Kinesis.
+The Collector receives the raw Wikimedia JSON object from each SSE `data:` line, validates source metadata, drops canary events, applies deterministic sampling, builds a normalized envelope, embeds the original raw event under `raw_event`, buffers normalized envelopes, and writes batches to Kinesis.
 
 Internal design:
-```
-SSE Reader Thread → Normalizer / Validator → In-memory Buffer → Kinesis Sender Thread
+
+```text
+Single long-running event loop
+→ read SSE line
+→ parse and validate
+→ deterministic sampling
+→ normalize
+→ append to in-memory buffer
+→ synchronous PutRecords flush when required
 ```
 
 Flush strategy:
-```
-Flush when: 100 events accumulated  OR  2 seconds elapsed  OR  shutdown signal
+
+```text
+Flush when: 100 events accumulated OR 2 seconds elapsed OR shutdown signal
 ```
 
 Filtering rules:
-```
+
+```text
 DROP if meta.id is missing
-DROP if meta.dt is missing or unparseable
+DROP if meta.dt is missing
 DROP if meta.domain == "canary"
-KEEP all five change types: edit, new, categorize, log, external
+DO NOT filter by change type; the current source types are edit, new, categorize, log, external
+```
+
+Sampling:
+
+```text
+SAMPLE_RATE default in development = 0.01
+sampling key = normalized event_id
+algorithm = deterministic SHA-256 score
 ```
 
 Kinesis record shape:
-```
+
+```text
 {
-  "event_id": "...",
-  "occurred_at": "...",
-  "payload": { normalized fields },
-  "raw_event": { original Wikimedia JSON exactly as received }
+  "event_id": "wikimedia-{meta.id}",
+  "event_type": "wiki.recentchange",
+  "occurred_at": "{meta.dt}",
+  "payload": { stable normalized fields },
+  "raw_event": { original Wikimedia JSON exactly as received },
+  "trace_context": { optional W3C trace context injected at flush time }
 }
 ```
 
 ### Kinesis Data Streams
 
-Central fan-out backbone. Receives normalized envelopes from the Collector and serves 3 independent consumers simultaneously.
+Central fan-out backbone. Receives normalized envelopes from the Collector and serves three independent consumers simultaneously.
 
-```
+```text
 Kinesis ──► Realtime Processor Lambda  (real-time aggregation)
         ──► Firehose Delivery Stream   (archival to S3 Bronze)
         ──► Alert Processor Lambda     (spike detection)
 ```
 
 Partition key:
-```
-PutRecords PartitionKey = hash(meta.id)
+
+```text
+PutRecords PartitionKey = normalized event_id
+Example: wikimedia-{meta.id}
 ```
 
-`meta.id` is the globally unique UUID from the Wikimedia Event Platform. Using it as the partition key distributes load evenly and avoids hot shards on high-volume keys like `enwiki:edit`.
+`meta.id` is a globally unique Wikimedia event UUID. Prefixing it as `wikimedia-{meta.id}` preserves high-cardinality distribution and avoids hot shards on dominant values such as `enwiki` or `edit`.
+
+The Collector creates one OpenTelemetry producer span per `PutRecords` flush. Every record built inside that flush receives the same W3C producer context in the optional `trace_context` envelope field.
 
 ### Realtime Processor Lambda
 
-Consumes Kinesis batches. For each normalized envelope:
+Consumes Kinesis batches. For each batch:
 
-1. Decode and validate the normalized envelope contract.
-2. Read only the stable normalized `payload` for real-time computation.
-3. Compute the 1-minute `aggregation_window`.
-4. Aggregate records in memory by `(metric_key, window_key)` before writing.
-5. Atomic `UpdateItem ADD` on DynamoDB — no read-modify-write.
-6. Write global activity to `METRIC#GLOBAL_ACTIVITY#SHARD#{shard_id}`, where `shard_id = hash(event_id) % GLOBAL_ACTIVITY_SHARD_COUNT`.
-7. Write known-wiki activity to `METRIC#WIKI_ACTIVITY#WIKI#{wiki}`.
-8. Write top-wikis candidates to `METRIC#TOP_WIKIS#SHARD#{shard_id}`, where `shard_id = hash(wiki) % TOP_METRIC_SHARD_COUNT`.
-9. Write change type distribution to `METRIC#CHANGE_TYPE#TYPE#{change_type}`.
-10. Write bot/human activity to `METRIC#BOT_ACTIVITY#BOT#{true|false}`.
-11. Write namespace distribution to `METRIC#NAMESPACE#NS#{namespace}`.
-12. If `namespace = 0`: write top-pages candidates to `METRIC#TOP_PAGES#SHARD#{shard_id}`, where `shard_id = hash(wiki#title) % TOP_METRIC_SHARD_COUNT`.
-13. Send a deduplicated broadcast signal to SQS FIFO every 5-second broadcast window after successful DynamoDB writes.
+1. Decode base64 JSON records.
+2. Accept envelopes where `event_type = wiki.recentchange`, `payload` is an object, and `event_id` is present.
+3. Normalize null or malformed optional values defensively.
+4. Compute the 1-minute `aggregation_window` from event time.
+5. Aggregate records in memory by `(metric_key, window_key)`.
+6. Submit atomic DynamoDB `UpdateItem ADD` operations through a bounded thread pool.
+7. Use a reusable low-level DynamoDB client and HTTP connection pool.
+8. Wait for all submitted writes before sending the broadcast signal.
+9. Send one deduplicated SQS FIFO signal per configured 3-second broadcast window after successful DynamoDB writes.
+
+Current bounded-parallel write configuration:
+
+```text
+DYNAMODB_WRITE_WORKERS         = 12
+DYNAMODB_MAX_POOL_CONNECTIONS = 20
+```
+
+Metric families written by the Processor:
+
+```text
+METRIC#GLOBAL_ACTIVITY#SHARD#{shard_id}
+METRIC#WIKI_ACTIVITY#WIKI#{wiki}
+METRIC#TOP_WIKIS#SHARD#{shard_id}
+METRIC#CHANGE_TYPE#TYPE#{change_type}
+METRIC#WIKI_CHANGE_TYPE#WIKI#{wiki}#TYPE#{change_type}
+METRIC#BOT_ACTIVITY#BOT#{true|false}
+METRIC#WIKI_BOT_ACTIVITY#WIKI#{wiki}#BOT#{true|false}
+METRIC#NAMESPACE#NS#{namespace}
+METRIC#WIKI_NAMESPACE#WIKI#{wiki}#NS#{namespace}
+METRIC#TOP_PAGES#SHARD#{shard_id}  # namespace 0 only
+```
+
+The Processor propagates OpenTelemetry context across worker threads. A Kinesis batch can contain records from multiple Collector flushes: the first unique producer context becomes the direct parent of the Processor span and additional producer contexts are represented as span links.
 
 > Log events (`namespace = -1`) are counted in global, wiki, top-wikis, change-type, bot, and namespace activity but excluded from top pages because top pages only includes `namespace = 0`.
 
 ### Write Sharding
 
-Global counters and top read models are distributed across DynamoDB shards to prevent hot partitions and avoid scans over high-cardinality dimensions.
+Global counters and top read models are distributed across DynamoDB partitions to reduce hot-key pressure and support parallel reads.
 
-```
+```text
 GLOBAL_ACTIVITY_SHARD_COUNT = 10
 TOP_METRIC_SHARD_COUNT      = 10
 
 Global activity write: METRIC#GLOBAL_ACTIVITY#SHARD#{0..9}
-Global activity read : Broadcaster reads all global shards and sums event_count
+Global activity read : Broadcaster BatchGetItem for all shards and sums event_count
 
 Top wikis write      : METRIC#TOP_WIKIS#SHARD#{0..9}
-Top wikis read       : Broadcaster queries all TOP_WIKIS shards for WINDOW#{minute}#WIKI#*, merges, sorts by event_count, returns top N
+Top wikis read       : parallel Query across all shards, merge, sort, top N
 
 Top pages write      : METRIC#TOP_PAGES#SHARD#{0..9}
-Top pages read       : Broadcaster queries all TOP_PAGES shards for WINDOW#{minute}#*, merges, sorts by event_count, returns top N
+Top pages read       : parallel Query across all shards, merge, sort, top N
 ```
+
+Per-wiki activity and per-wiki distributions use the wiki code in the partition key because they are read directly for a requested `wiki:{wiki}` topic.
 
 ### SQS FIFO Deduplication
 
@@ -168,42 +214,56 @@ SQS FIFO prevents the Broadcaster from being invoked once per Kinesis Lambda inv
 
 Aggregation and broadcast use two different time concepts:
 
-```
+```text
 aggregation_window = 1 minute   # DynamoDB counter window
-broadcast_window   = 5 seconds  # dashboard refresh trigger
+broadcast_window   = 3 seconds  # configurable dashboard refresh trigger
 ```
 
 Example:
-```
-aggregation_window = 2026-06-11T16:44:00Z
-broadcast_window   = 2026-06-11T16:44:10Z
+
+```text
+aggregation_window = 2026-07-27T16:44:00Z
+broadcast_window   = 2026-07-27T16:44:51Z
 ```
 
 Message settings:
-```
+
+```text
 MessageGroupId         = "realtime-broadcast"
 MessageDeduplicationId = "BROADCAST#{broadcast_window}"
 ```
 
-This means the Realtime Processor can update the same minute counter continuously, while the Broadcaster pushes a live snapshot of the in-progress minute every 5 seconds.
+The message body includes the affected aggregation windows and oldest/latest source event timestamps per window. W3C `traceparent`, `tracestate`, and `baggage` are propagated through SQS message attributes when available.
+
+The Realtime Processor can update the same minute counter continuously, while the Broadcaster pushes a current snapshot of the in-progress minute at most once per 3-second window.
 
 ### Broadcaster Lambda
 
-Triggered by SQS FIFO. For each broadcast signal:
+Triggered by SQS FIFO with `batch_size = 1`. For each broadcast signal:
 
-1. Read all global activity shards for the requested `aggregation_window` and sum `event_count`.
-2. Read `BOT_ACTIVITY` true/false counters and compute `bot_ratio`.
-3. Read known `CHANGE_TYPE` counters.
-4. Read known/common `NAMESPACE` counters.
-5. Query all `TOP_WIKIS#SHARD#{n}` partitions with `begins_with(window_key, "WINDOW#{minute}#WIKI#")`, merge results, sort by `event_count`, and return top N.
-6. Query all `TOP_PAGES#SHARD#{n}` partitions with `begins_with(window_key, "WINDOW#{minute}#")`, merge results, sort by `event_count`, and return top N.
-7. Scan `websocket_connections`.
-8. Filter subscribed topics inside Lambda.
-9. Build `stats.update` messages for each requested topic.
-10. Call `postToConnection` for each connection.
-11. On `GoneException / 410`: delete the stale connection from DynamoDB.
+1. Extract the W3C trace context from SQS message attributes.
+2. Scan `websocket_connections` with a projection containing only `connection_id`, `topics`, and `ttl`.
+3. Skip expired connection items and group active connections by topic inside Lambda.
+4. Read exact counters with DynamoDB `BatchGetItem`.
+5. Query TOP_WIKIS and TOP_PAGES shards in parallel through a bounded DynamoDB read pool.
+6. Build `stats.update` messages for `global`, `wiki:{wiki}`, and `top_pages`.
+7. Send messages through a bounded `PostToConnection` thread pool.
+8. Record freshness after each successful `PostToConnection` using the latest source event timestamp carried by the SQS signal.
+9. Delete stale connections after `GoneException / HTTP 410` using bounded-parallel DynamoDB deletes.
 
-V1 intentionally uses a DynamoDB Scan on `websocket_connections` because subscriptions are stored as a list on the connection item. This is acceptable for portfolio scale. V2 introduces a `websocket_subscriptions` table keyed by topic.
+Current concurrency defaults:
+
+```text
+MAX_POST_WORKERS          = 40
+DYNAMODB_READ_WORKERS     = 24
+APIGW_MAX_POOL_CONNECTIONS >= 48
+DYNAMODB_MAX_POOL_CONNECTIONS >= 32
+TRACE_POST_TO_CONNECTION_CALLS = false
+```
+
+Per-connection API Gateway SDK spans are disabled by default to avoid high trace volume. The high-level `broadcaster.fanout` span and detailed metrics remain enabled.
+
+V1 intentionally uses a DynamoDB Scan on `websocket_connections` because subscriptions are stored as a list on each connection item. The validated capacity and degradation boundary are established through load testing. V2 replaces the Scan and single broadcaster with topic/shard queries and horizontally scaled fan-out workers.
 
 ### API Gateway WebSocket Routes
 
@@ -256,31 +316,34 @@ SK = CONNECTION#{connection_id}
 
 ### Table: realtime_aggregates
 
-```
+```text
 PK  = metric_key   (string)
 SK  = window_key   (string)
-
 TTL = now + AGGREGATE_TTL_DAYS
 ```
 
 Current default:
-```
+
+```text
 AGGREGATE_TTL_DAYS = 2
 ```
 
 Item patterns:
 
-```
-METRIC#GLOBAL_ACTIVITY#SHARD#{0-9}  /  WINDOW#{minute}
-METRIC#WIKI_ACTIVITY#WIKI#{wiki}    /  WINDOW#{minute}
-METRIC#TOP_WIKIS#SHARD#{0-9}        /  WINDOW#{minute}#WIKI#{wiki}
-METRIC#CHANGE_TYPE#TYPE#{type}      /  WINDOW#{minute}
-METRIC#BOT_ACTIVITY#BOT#{true|false}/  WINDOW#{minute}
-METRIC#NAMESPACE#NS#{namespace}     /  WINDOW#{minute}
-METRIC#TOP_PAGES#SHARD#{0-9}        /  WINDOW#{minute}#WIKI#{wiki}#TITLE#{page_hash}
+```text
+METRIC#GLOBAL_ACTIVITY#SHARD#{0-9}                        / WINDOW#{minute}
+METRIC#WIKI_ACTIVITY#WIKI#{wiki}                          / WINDOW#{minute}
+METRIC#TOP_WIKIS#SHARD#{0-9}                              / WINDOW#{minute}#WIKI#{wiki}
+METRIC#CHANGE_TYPE#TYPE#{type}                            / WINDOW#{minute}
+METRIC#WIKI_CHANGE_TYPE#WIKI#{wiki}#TYPE#{type}           / WINDOW#{minute}
+METRIC#BOT_ACTIVITY#BOT#{true|false}                      / WINDOW#{minute}
+METRIC#WIKI_BOT_ACTIVITY#WIKI#{wiki}#BOT#{true|false}     / WINDOW#{minute}
+METRIC#NAMESPACE#NS#{namespace}                           / WINDOW#{minute}
+METRIC#WIKI_NAMESPACE#WIKI#{wiki}#NS#{namespace}          / WINDOW#{minute}
+METRIC#TOP_PAGES#SHARD#{0-9}                              / WINDOW#{minute}#WIKI#{wiki}#TITLE#{page_hash}
 ```
 
-Top pages are written only when `namespace = 0`. The real display fields (`wiki`, `title`, `title_url`) are stored as item attributes; the `TITLE#{page_hash}` suffix is only used to keep the key compact and stable.
+Top pages are written only when `namespace = 0`. The real display fields (`wiki`, `title`, `title_url`) are stored as item attributes; the `TITLE#{page_hash}` suffix keeps the key compact and stable.
 
 ### Table: alert_state
 
@@ -373,8 +436,8 @@ Lambda is excluded: it has a maximum execution duration and cannot maintain an i
 ### ADR-002 — Kinesis Data Streams as event backbone
 Kinesis provides durable buffering, fan-out to multiple independent consumers, configurable retention, and native Lambda and Firehose integration.
 
-### ADR-003 — hash(meta.id) as Kinesis PartitionKey
-`meta.id` is the globally unique UUID from the Wikimedia Event Platform. Hashing it distributes records evenly across shards. Using `wiki` or `change_type` as key would create hot shards: `enwiki` and `edit` dominate the stream volume.
+### ADR-003 — normalized event_id as Kinesis PartitionKey
+The Collector uses `event_id = "wikimedia-{meta.id}"` directly as the Kinesis partition key. `meta.id` is globally unique and high-cardinality, so the prefixed value distributes records evenly without concentrating traffic on dominant dimensions such as `wiki` or `change_type`.
 
 ### ADR-004 — DynamoDB for real-time aggregates
 DynamoDB provides single-digit millisecond writes, atomic `ADD` counter updates without read-modify-write, and TTL for automatic cleanup. Raw events are not stored in DynamoDB — only aggregated counters needed by the broadcaster and alert state.
@@ -385,8 +448,8 @@ A single `METRIC#GLOBAL_ACTIVITY` item receiving all increments from concurrent 
 ### ADR-006 — API Gateway WebSocket for live dashboard
 The dashboard requires bidirectional communication: the backend pushes `stats.update` snapshots, and the frontend sends `subscribe`/`unsubscribe` messages. SSE only supports server-to-client direction and is therefore excluded.
 
-### ADR-007 — SQS FIFO for 5-second broadcast deduplication
-Without deduplication, every Kinesis Lambda invocation would trigger a broadcaster call. SQS FIFO deduplicates broadcast triggers by 5-second `broadcast_window`, while DynamoDB counters remain aggregated by 1-minute `aggregation_window`. This provides a live dashboard feel without excessive fan-out.
+### ADR-007 — SQS FIFO for short-window broadcast deduplication
+Without deduplication, every Kinesis Lambda invocation would trigger a broadcaster call. SQS FIFO deduplicates triggers by a configurable `broadcast_window`, currently 3 seconds, while DynamoDB counters remain aggregated by a 1-minute `aggregation_window`.
 
 ### ADR-008 — Normalized envelope + embedded raw_event
 The Collector sends a normalized envelope to Kinesis and embeds the original Wikimedia JSON under `raw_event`. Real-time consumers use the stable `payload`; S3 Bronze preserves source fidelity for audit, replay, and schema recovery.
@@ -401,43 +464,163 @@ V1 stores topics as a list on each `websocket_connections` item. The Broadcaster
 
 ## Scalability Path
 
-### V1 — Portfolio / up to low thousands of concurrent users
-```
+### V1 — Current implementation
+
+```text
 Single Broadcaster Lambda
-SQS FIFO deduplication every 5 seconds
+SQS FIFO deduplication every 3 seconds
+Single MessageGroupId: realtime-broadcast
 DynamoDB websocket_connections table
 Broadcaster Scan + Lambda-side topic filtering
-write sharding for global counters (10 shards)
+Bounded-parallel DynamoDB reads and PostToConnection calls
+Write sharding for global and top read models
 ```
 
-### V2 — 100K+ users
+Validated baseline:
+
+```text
+500 concurrent WebSocket connections subscribed to global
+500 successful PostToConnection calls in the measured broadcast
+No durable SQS backlog during the validated run
 ```
+
+This is a validated baseline, not the final capacity limit. Additional tests increase connection count progressively and document the highest sustainable level while maintaining freshness and avoiding durable backlog.
+
+### V2 — Sharded fan-out
+
+```text
 Add websocket_subscriptions table:
-  PK = TOPIC#{topic}
+  PK = TOPIC#{topic}#SHARD#{shard_id}
   SK = CONNECTION#{connection_id}
 
-Broadcaster Coordinator Lambda
-→ Query subscriptions by topic
-→ Splits connection list into chunks
-→ Sends chunks to SQS standard queue
-→ N Broadcaster Worker Lambdas each push to a subset
+Snapshot Coordinator Lambda
+→ builds one current payload per topic
+→ creates one job per topic/shard
+
+SQS fan-out queue
+→ multiple MessageGroupIds
+→ parallel worker consumption
+
+Broadcast Worker Lambda
+→ Query subscriptions by topic/shard
+→ bounded-parallel PostToConnection
+→ latest-state-wins for stale jobs
 ```
 
-### V3 — Millions of users
-```
+### V3 — Managed or persistent realtime fleet
+
+```text
 AWS IoT Core pub/sub
 AWS AppSync subscriptions
 ECS/EKS persistent WebSocket fleet
-Managed: Ably, Pusher, PubNub
+Managed realtime platform where appropriate
 ```
-
----
 
 ## Observability
 
+Grafana Cloud is the central operational interface:
+
+```text
+Grafana Cloud
+├── Mimir  : metrics
+├── Loki   : logs
+├── Tempo  : traces
+└── Grafana dashboards and alerting
+```
+
+### Telemetry paths
+
+Collector:
+
+```text
+ECS Collector OTel SDK
+→ local Grafana Alloy sidecar
+→ Grafana Cloud OTLP endpoint
+```
+
+Realtime Processor and Broadcaster:
+
+```text
+Lambda OTel SDK
+→ local OpenTelemetry Collector Lambda Extension
+→ Grafana Cloud OTLP endpoint
+```
+
+Structured application logs continue through CloudWatch Logs and are forwarded to Loki. AWS managed-service metrics remain native in CloudWatch and are queried from Grafana through the AWS integration.
+
+### Distributed tracing
+
+```text
+Collector flush producer span
+→ trace_context embedded in each Kinesis record
+→ Realtime Processor parent context + span links for additional producers
+→ traceparent/tracestate/baggage in SQS MessageAttributes
+→ Broadcaster Lambda
+→ API Gateway Management API
+```
+
+The trace represents technical causality and processing latency. It does not provide exact event-to-snapshot lineage because the Broadcaster reads shared DynamoDB aggregates that can contain contributions from multiple Processor invocations.
+
+### Realtime Processor metrics
+
+```text
+realtime_processor_batches_total
+realtime_processor_records_received_total
+realtime_processor_records_decoded_total
+realtime_processor_records_valid_total
+realtime_processor_records_skipped_total
+realtime_processor_records_failed_total
+dynamodb_aggregate_updates_total
+dynamodb_aggregate_update_failure_total
+dynamodb_update_batch_duration_ms
+broadcast_signals_sent_total
+broadcast_signal_failure_total
+broadcast_signal_skipped_total
+broadcast_signal_duration_ms
+processor_batch_duration_ms
+```
+
+### Broadcaster metrics
+
+```text
+websocket_post_success_total
+websocket_post_failure_total
+websocket_connection_gone_total
+websocket_messages_sent_total
+broadcast_completed_total
+broadcast_failed_total
+broadcast_duration_ms
+websocket_post_duration_ms
+event_to_dashboard_latency_ms
+oldest_event_to_dashboard_latency_ms
+active_connections_scanned
+connections_scan_duration_ms
+aggregate_reads_duration_ms
+payload_build_duration_ms
+fanout_duration_ms
+fanout_batch_size
+gone_cleanup_duration_ms
+```
+
+### Primary operational signals
+
+```text
+Realtime freshness p50/p95/p99
+Freshness compliance ratio below 10 seconds
+WebSocket delivery success ratio
+Kinesis IteratorAge
+SQS ApproximateAgeOfOldestMessage
+SQS visible message count
+Lambda duration, errors, throttles, and concurrency
+DynamoDB throttled requests
+API Gateway callback errors
+OTel export and collector health
+Historical Silver/Gold freshness
+```
+
 ### CloudWatch Log Groups
 
-```
+```text
 /ecs/realtime-media-analytics/collector
 /aws/lambda/realtime-processor
 /aws/lambda/broadcaster
@@ -447,61 +630,7 @@ Managed: Ably, Pusher, PubNub
 /aws/lambda/alert-processor
 ```
 
-### Custom Metrics
-
-**Collector**
-```
-custom:collector:events_read_total       total SSE events received from Wikimedia
-custom:collector:events_dropped_canary   canary events filtered out
-custom:collector:events_sampled_out      events dropped by dev sampling
-custom:collector:events_sent_kinesis     total envelopes delivered to Kinesis
-custom:collector:batch_size              events per PutRecords call
-custom:collector:reconnect_count         SSE reconnection events
-custom:collector:kinesis_throttle_count  Kinesis PutRecords throttle responses
-```
-
-**Realtime Processor**
-```
-custom:processor:events_processed        events processed per Lambda invocation
-custom:processor:dynamodb_write_count    DynamoDB UpdateItem calls
-custom:processor:sqs_signal_sent         broadcast signals sent to SQS FIFO
-```
-
-**Broadcaster**
-```
-custom:broadcaster:connections_scanned   active connections scanned
-custom:broadcaster:connections_matched   connections matched after topic filtering
-custom:broadcaster:messages_sent         WebSocket messages delivered
-custom:broadcaster:gone_connections      stale connections removed on GoneException
-```
-
-**Alert Processor**
-```
-custom:alert:state_updates               DynamoDB alert_state updates
-custom:alert:z_score                     computed z_score
-custom:alert:alerts_published            SNS alerts published
-```
-
-### CloudWatch Alarms
-
-| Alarm | Metric | Threshold | Action |
-
-|---|---|---|---|
-|Realtime Processor lag | Lambda IteratorAge | > 60 000 ms | SNS
-|Alert Processor lag    | Lambda IteratorAge | > 60 000 ms | SNS
-|Firehose freshness lag | DeliveryToS3.DataFreshness | > 300 000 ms | SNS
-|Kinesis read throttles | ReadProvisionedThroughputExceeded | > 0 | SNS
-|Kinesis write throttles| WriteProvisionedThroughputExceeded | > 0 | SNS
-| Kinesis iterator age high | `GetRecords.IteratorAgeMilliseconds` | > 60 000 ms | SNS |
-| Realtime processor errors | Lambda `Errors` | > 5 in 5 min | SNS |
-| Broadcaster errors | Lambda `Errors` | > 5 in 5 min | SNS |
-| Collector task stopped | ECS `RunningTaskCount` | < 1 | SNS |
-| DynamoDB throttles | `ThrottledRequests` | > 10 in 5 min | SNS |
-| SQS queue depth | `ApproximateNumberOfMessagesVisible` | > 100 | SNS |
-
-**Key metric:** `IteratorAgeMilliseconds` = age of the oldest unprocessed record in the shard. Target: < 5 000 ms.
-For Lambda consumers, IteratorAge measures the age of the last Kinesis record included in the batch delivered to that specific Lambda event source mapping. It must be monitored per consumer, not only at stream level.
----
+Native CloudWatch alarms remain a minimal independent safety layer for critical AWS health signals.
 
 ## Security
 
@@ -511,7 +640,7 @@ For Lambda consumers, IteratorAge measures the age of the last Kinesis record in
 |---|---|
 | ECS Fargate Collector | `kinesis:PutRecord`, `kinesis:PutRecords`, `logs:PutLogEvents`, KMS use for Kinesis |
 | Realtime Processor Lambda | `kinesis:GetRecords`, `kinesis:GetShardIterator`, `dynamodb:UpdateItem`, `sqs:SendMessage`, KMS use for Kinesis/DynamoDB/SQS |
-| Broadcaster Lambda | `dynamodb:GetItem`, `dynamodb:Scan`, `dynamodb:DeleteItem`, `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `execute-api:ManageConnections`, KMS use for DynamoDB/SQS |
+| Broadcaster Lambda | `dynamodb:GetItem`, `dynamodb:BatchGetItem`, `dynamodb:Query`, `dynamodb:Scan`, `dynamodb:DeleteItem`, `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `execute-api:ManageConnections`, KMS use for DynamoDB/SQS |
 | Connect / Disconnect / Default Lambdas | `dynamodb:PutItem`, `dynamodb:DeleteItem`, `dynamodb:UpdateItem`, `execute-api:ManageConnections` for acknowledgements |
 | Alert Processor Lambda | `kinesis:GetRecords`, `kinesis:GetShardIterator`, `dynamodb:GetItem`, `dynamodb:UpdateItem`, `dynamodb:Query`, `sns:Publish`, KMS use for Kinesis/DynamoDB/SNS |
 | Firehose Delivery Stream | `kinesis:GetRecords`, `s3:PutObject`, KMS use for Kinesis/S3 |
@@ -625,6 +754,7 @@ Symptom : DynamoDB throttling alarm. Real-time aggregates lagging.
      --billing-mode PAY_PER_REQUEST
 4. Monitor consumed capacity.
 5. If global counter throttles persist despite write sharding:
-   → Increase AGGREGATE_WRITE_SHARDS from 10 to 20.
-   → Update Realtime Processor and Broadcaster Lambda configuration.
+   → Increase `GLOBAL_ACTIVITY_SHARD_COUNT` if the global counter family is hot.
+   → Increase `TOP_METRIC_SHARD_COUNT` if TOP_WIKIS or TOP_PAGES read models are hot.
+   → Update Realtime Processor and Broadcaster configuration together.
 ```

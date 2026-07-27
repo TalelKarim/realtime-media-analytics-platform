@@ -109,7 +109,7 @@ Retention : 3 years → Standard-IA after 30 days
 
 ### Job 1 — Bronze to Silver
 
-```
+```text
 Name     : wikimedia-bronze-to-silver
 Trigger  : hourly scheduler — processes previous hour's partition
 Runtime  : AWS Glue 4.0, Python 3
@@ -119,24 +119,24 @@ Workers  : 2 × G.1X (scalable)
 Transformations applied:
 
 ```python
-from pyspark.sql.functions import col, to_date, to_json, when
+from pyspark.sql.functions import col, lower, to_date, to_json, when
 
-# Bronze rows are Contract 2 envelopes:
-# event_id, occurred_at, ingested_at, payload.*, raw_event
+# Bronze rows are current Contract 2 envelopes:
+# event_id, occurred_at, ingested_at, payload.*, raw_event, optional trace_context
 
 df = df.filter(col("event_id").isNotNull())
 df = df.filter(col("occurred_at").isNotNull())
 
 df = df.withColumn("ingestion_date", to_date(col("occurred_at")))
 df = df.withColumn("wiki", lower(col("payload.wiki")))
-df = df.withColumn("user_is_bot", col("payload.user_is_bot").cast("boolean"))
-df = df.withColumn("is_minor", col("payload.is_minor").cast("boolean"))
-df = df.withColumn("is_patrolled", col("payload.is_patrolled").cast("boolean"))
-df = df.withColumn("delta_bytes", col("payload.delta_bytes"))
+df = df.withColumn("user_is_bot", col("payload.bot").cast("boolean"))
+df = df.withColumn("is_minor", col("payload.minor").cast("boolean"))
+df = df.withColumn("is_patrolled", col("payload.patrolled").cast("boolean"))
+df = df.withColumn("delta_bytes", col("payload.length_delta"))
 
 df = df.withColumn(
     "log_params",
-    when(col("payload.log_params").isNotNull(), to_json(col("payload.log_params")))
+    when(col("raw_event.log_params").isNotNull(), to_json(col("raw_event.log_params")))
     .otherwise(None)
 )
 
@@ -154,17 +154,17 @@ df = df.select(
     "user_is_bot",
     "is_minor",
     "is_patrolled",
-    col("payload.old_length").alias("old_length"),
-    col("payload.new_length").alias("new_length"),
+    col("payload.length_old").alias("old_length"),
+    col("payload.length_new").alias("new_length"),
     "delta_bytes",
     col("payload.revision_old").alias("revision_old"),
     col("payload.revision_new").alias("revision_new"),
     col("payload.change_url").alias("change_url"),
-    col("payload.raw_notify_url").alias("raw_notify_url"),
-    col("payload.log_type").alias("log_type"),
-    col("payload.log_action").alias("log_action"),
+    col("raw_event.notify_url").alias("raw_notify_url"),
+    col("raw_event.log_type").alias("log_type"),
+    col("raw_event.log_action").alias("log_action"),
     "log_params",
-    col("payload.wikimedia_recentchange_id").alias("wikimedia_rcid")
+    col("raw_event.id").alias("wikimedia_rcid")
 )
 
 df.write.partitionBy("ingestion_date").mode("append").parquet("s3://bucket/silver/...")
@@ -225,7 +225,7 @@ change_dist = df.groupBy("change_type", window("occurred_at", "1 hour").alias("h
 
 ## Glue Data Catalog
 
-```
+```text
 Database : realtime_media_analytics
 
 Tables:
@@ -238,18 +238,16 @@ Tables:
   activity_spikes                → s3://bucket/gold/activity_spikes/
 ```
 
-Partition projection enabled on all tables:
+Partition projection is configured according to each table's physical layout:
 
+```text
+Bronze hourly paths       : year / month / day / hour
+Silver paths              : ingestion_date
+Hourly Gold datasets      : year / month / day / hour
+Daily Gold datasets       : year / month / day
 ```
-year  : integer, range 2026–2030
-month : integer, range 1–12
-day   : integer, range 1–31
-hour  : integer, range 0–23
-```
 
-Partition projection eliminates `MSCK REPAIR TABLE`.
-
----
+Projected tables do not require `MSCK REPAIR TABLE` or per-partition catalog registration after each ETL write.
 
 ## Athena
 

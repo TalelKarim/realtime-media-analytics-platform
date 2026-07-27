@@ -136,9 +136,9 @@ Legend:
 
 ```text
 DROP if meta.id is missing
-DROP if meta.dt is missing or unparseable
+DROP if meta.dt is missing
 DROP if meta.domain == "canary"
-KEEP all five change types: edit, new, categorize, log, external
+DO NOT filter by change type; the current source types are edit, new, categorize, log, external
 ```
 
 ---
@@ -148,24 +148,24 @@ KEEP all five change types: edit, new, categorize, log, external
 **Producer:** ECS Fargate Collector  
 **Consumers:** Realtime Processor Lambda, Alert Processor Lambda, Firehose Delivery Stream
 
-The Collector transforms every valid Wikimedia raw event into a normalized envelope.
+The Collector transforms every valid and sampled Wikimedia raw event into a normalized envelope.
 
-The envelope intentionally contains both:
+The envelope contains:
 
 ```text
-payload    stable normalized fields used by real-time consumers
-raw_event  original Wikimedia JSON exactly as received from the SSE data line
+payload        normalized fields used by internal consumers
+raw_event      original Wikimedia JSON exactly as received
+trace_context  optional W3C propagation metadata added when the Kinesis record is built
 ```
-
-This gives the project a stable real-time contract while preserving source fidelity in S3 Bronze.
 
 ### Kinesis partition key
 
 ```text
-PartitionKey = hash(meta.id)
+PartitionKey = normalized event_id
+Example: wikimedia-{meta.id}
 ```
 
-The Kinesis partition key is a PutRecords call parameter. It is not stored as a JSON field.
+The partition key is a `PutRecords` request parameter and is not duplicated as a separate JSON field.
 
 ### Envelope schema
 
@@ -179,112 +179,129 @@ The Kinesis partition key is a PutRecords call parameter. It is not stored as a 
   "ingested_at": "{collector ingestion time}",
   "correlation_id": "{collector generated UUID}",
   "payload": {
-    "wikimedia_recentchange_id": "{id}",
-    "wiki": "{wiki}",
-    "domain": "{meta.domain}",
-    "change_type": "{type}",
-    "namespace": "{namespace}",
-    "title": "{title}",
+    "wiki": "{wiki or null}",
+    "domain": "{meta.domain or null}",
+    "stream": "{meta.stream or null}",
+    "request_id": "{meta.request_id or null}",
+    "topic": "{meta.topic or null}",
+    "partition": "{meta.partition or null}",
+    "offset": "{meta.offset or null}",
+    "change_type": "{type or null}",
+    "namespace": "{namespace or null}",
+    "title": "{title or null}",
     "title_url": "{title_url or null}",
-    "user": "{user}",
-    "user_is_bot": "{bot boolean}",
-    "is_minor": "{minor or null}",
-    "is_patrolled": "{patrolled or null}",
-    "old_length": "{length.old or null}",
-    "new_length": "{length.new or null}",
-    "delta_bytes": "{new_length - old_length or null}",
+    "user": "{user or null}",
+    "bot": "{bot or null}",
+    "minor": "{minor or null}",
+    "patrolled": "{patrolled or null}",
+    "comment": "{comment or null}",
+    "parsedcomment": "{parsedcomment or null}",
+    "source_timestamp": "{timestamp or null}",
     "revision_old": "{revision.old or null}",
     "revision_new": "{revision.new or null}",
-    "change_url": "{best effort URL or null}",
-    "raw_notify_url": "{notify_url or null}",
-    "log_type": "{log_type or null}",
-    "log_action": "{log_action or null}",
-    "log_params": "{log_params or null}"
+    "length_old": "{length.old or null}",
+    "length_new": "{length.new or null}",
+    "length_delta": "{length.new - length.old or null}",
+    "change_url": "{notify_url or title_url or meta.uri or null}",
+    "server_url": "{server_url or null}",
+    "server_name": "{server_name or null}",
+    "server_script_path": "{server_script_path or null}"
   },
   "raw_event": {
     "...": "original Wikimedia event"
+  },
+  "trace_context": {
+    "traceparent": "00-...-...-01",
+    "tracestate": "optional",
+    "baggage": "optional"
   }
 }
 ```
 
+`trace_context` is optional. It is infrastructure metadata, not business data. All Kinesis records created inside the same Collector flush producer span receive the same W3C producer context.
+
 ### Field mapping
 
-| Normalized field | Source field | Rule |
-|---|---|---|
-| `event_id` | `meta.id` | `"wikimedia-" + meta.id` |
-| `occurred_at` | `meta.dt` | ISO8601 |
-| `wikimedia_recentchange_id` | `id` | integer, per-wiki only |
-| `wiki` | `wiki` | lower-case when possible |
-| `domain` | `meta.domain` | null-safe |
-| `change_type` | `type` | `edit`, `new`, `categorize`, `log`, `external` |
-| `namespace` | `namespace` | may be -1, 0, 14, etc. |
-| `title` | `title` | null-safe |
-| `title_url` | `title_url` | null if absent |
-| `user` | `user` | null-safe |
-| `user_is_bot` | `bot` | cast boolean |
-| `is_minor` | `minor` | null for non-edit/non-new types |
-| `is_patrolled` | `patrolled` | null if absent |
-| `old_length` | `length.old` | null if absent |
-| `new_length` | `length.new` | null if absent |
-| `delta_bytes` | computed | `new_length - old_length`, null if either absent |
-| `revision_old` | `revision.old` | null if absent |
-| `revision_new` | `revision.new` | null if absent |
-| `change_url` | computed | `notify_url` OR diff URL OR `title_url` OR null |
-| `raw_notify_url` | `notify_url` | null if absent |
-| `log_type` | `log_type` | null for non-log types |
-| `log_action` | `log_action` | null for non-log types |
-| `log_params` | `log_params` | null for non-log; may be array, object, or string |
-| `raw_event` | full raw event | original Wikimedia JSON object |
+| Envelope field | Source / rule |
+|---|---|
+| `event_id` | `"wikimedia-" + meta.id` |
+| `event_type` | constant `wiki.recentchange` |
+| `event_version` | constant `1.0` |
+| `source` | constant `wikimedia.eventstreams` |
+| `occurred_at` | `meta.dt` |
+| `ingested_at` | Collector UTC ingestion timestamp |
+| `correlation_id` | Collector-generated UUID per normalized event |
+| `payload.wiki` | `wiki` |
+| `payload.domain` | `meta.domain` |
+| `payload.stream` | `meta.stream` |
+| `payload.request_id` | `meta.request_id` |
+| `payload.topic` | `meta.topic` |
+| `payload.partition` | `meta.partition` |
+| `payload.offset` | `meta.offset` |
+| `payload.change_type` | `type` |
+| `payload.namespace` | `namespace` |
+| `payload.title` | `title` |
+| `payload.title_url` | `title_url` |
+| `payload.user` | `user` |
+| `payload.bot` | `bot` |
+| `payload.minor` | `minor` |
+| `payload.patrolled` | `patrolled` |
+| `payload.comment` | `comment` |
+| `payload.parsedcomment` | `parsedcomment` |
+| `payload.source_timestamp` | `timestamp` |
+| `payload.revision_old` | `revision.old` |
+| `payload.revision_new` | `revision.new` |
+| `payload.length_old` | `length.old` |
+| `payload.length_new` | `length.new` |
+| `payload.length_delta` | `length.new - length.old`, null unless both are integers |
+| `payload.change_url` | `notify_url` OR `title_url` OR `meta.uri` |
+| `raw_event` | full source JSON object |
+| `trace_context` | optional W3C carrier injected at Kinesis flush time |
 
-### Required fields for Realtime Processor
+Fields such as `log_type`, `log_action`, `log_params`, `id`, and other source-only values remain available under `raw_event` even when they are not duplicated into `payload`.
 
-Realtime Processor requires:
+### Realtime Processor acceptance rules
 
-```text
-event_id
-event_type = wiki.recentchange
-occurred_at
-payload.wiki
-payload.change_type
-payload.namespace
-payload.title
-payload.user_is_bot or payload.bot
-```
-
-Events missing required fields are skipped.
-
-### Required fields for Alert Processor
-
-Alert Processor requires:
+The Realtime Processor accepts a record when:
 
 ```text
-event_id
-event_type = wiki.recentchange
-occurred_at
-payload.wiki
-payload.change_type
-payload.log_type
-payload.log_action
-payload.user_is_bot
+event_type == wiki.recentchange
+payload is a JSON object
+event_id is present
 ```
 
-Optional / used only for log detection 
-payload.log_type
-payload.log_action
----
+Optional values are normalized defensively:
+
+```text
+occurred_at malformed or absent → processing time fallback
+wiki absent                    → "unknown"
+change_type absent             → "unknown"
+title absent                   → "unknown"
+bot absent                     → false
+```
+
+The Processor accepts both `payload.user_is_bot` and `payload.bot` for backward compatibility.
+
+### Alert Processor fields
+
+Alert-specific values that are not present in the normalized payload remain available in `raw_event`, including:
+
+```text
+log_type
+log_action
+log_params
+```
+
+The Alert Processor contract must remain null-safe because all non-`meta` source fields are optional.
 
 ## Contract 3 — DynamoDB `realtime_aggregates`
 
 **Producer:** Realtime Processor Lambda  
 **Consumer:** Broadcaster Lambda
 
-This contract is the source of truth for the live dashboard read model.
+This table is the source of truth for the live dashboard read model. It stores short-lived 1-minute counters.
 
-The table stores short-lived, 1-minute real-time counters.
-
-All writes are atomic `UpdateItem ADD` operations.
-
-The Realtime Processor must aggregate records in memory first, then update one item per touched `(metric_key, window_key)` pair.
+The Realtime Processor aggregates Kinesis records in memory and then executes atomic `UpdateItem ADD` operations through a bounded thread pool.
 
 ### Table keys
 
@@ -295,27 +312,24 @@ SK = window_key
 
 ### Common attributes
 
-All current metric items use this common shape:
-
 ```json
 {
   "metric_key": "METRIC#...",
-  "window_key": "WINDOW#2026-06-24T13:30:00Z",
+  "window_key": "WINDOW#2026-07-27T16:44:00Z",
   "event_count": 1,
-  "window_start": "2026-06-24T13:30:00Z",
-  "last_updated_at": "2026-06-24T13:30:42.123456Z",
-  "ttl": 1782480642
+  "window_start": "2026-07-27T16:44:00Z",
+  "last_updated_at": "2026-07-27T16:44:53.747000Z",
+  "ttl": 1785343493
 }
 ```
 
 Naming rule:
 
 ```text
-event_count is singular.
-Do not use events_count.
+event_count is singular
 ```
 
-Window key rule:
+Window rule:
 
 ```text
 window_key always starts with WINDOW#{yyyy-MM-ddTHH:mm:00Z}
@@ -324,236 +338,78 @@ window_key always starts with WINDOW#{yyyy-MM-ddTHH:mm:00Z}
 TTL rule:
 
 ```text
-ttl = now + AGGREGATE_TTL_DAYS
+ttl = processing time + AGGREGATE_TTL_DAYS
+AGGREGATE_TTL_DAYS default = 2
 ```
-
-Current default:
-
-```text
-AGGREGATE_TTL_DAYS = 2
-```
-
----
 
 ### 3a — Global activity
 
-Metric family:
+```text
+metric_key = METRIC#GLOBAL_ACTIVITY#SHARD#{0..9}
+window_key = WINDOW#{minute}
+shard_id   = hash(event_id) % GLOBAL_ACTIVITY_SHARD_COUNT
+```
+
+The Broadcaster reads all configured shards with `BatchGetItem` and sums `event_count`.
+
+### 3b — Wiki activity
 
 ```text
-METRIC#GLOBAL_ACTIVITY#SHARD#{0..9}
+metric_key = METRIC#WIKI_ACTIVITY#WIKI#{wiki}
+window_key = WINDOW#{minute}
 ```
 
-Example:
-
-```json
-{
-  "metric_key": "METRIC#GLOBAL_ACTIVITY#SHARD#2",
-  "window_key": "WINDOW#2026-06-24T13:30:00Z",
-  "event_count": 120,
-  "window_start": "2026-06-24T13:30:00Z",
-  "last_updated_at": "2026-06-24T13:30:42.123456Z",
-  "ttl": 1782480642
-}
-```
-
-Write rule:
-
-```text
-shard_id = hash(event_id) % GLOBAL_ACTIVITY_SHARD_COUNT
-```
-
-Read rule:
-
-```text
-Read all GLOBAL_ACTIVITY shards for the requested window.
-Sum event_count across shards.
-```
-
-Purpose:
-
-```text
-Global platform activity count for the live dashboard.
-```
-
----
-
-### 3b — Wiki activity by known wiki
-
-Metric family:
-
-```text
-METRIC#WIKI_ACTIVITY#WIKI#{wiki}
-```
-
-Example:
-
-```json
-{
-  "metric_key": "METRIC#WIKI_ACTIVITY#WIKI#frwiki",
-  "window_key": "WINDOW#2026-06-24T13:30:00Z",
-  "event_count": 18,
-  "wiki": "frwiki",
-  "window_start": "2026-06-24T13:30:00Z",
-  "last_updated_at": "2026-06-24T13:30:42.123456Z",
-  "ttl": 1782480642
-}
-```
-
-Purpose:
-
-```text
-Read activity for a specific wiki topic, for example wiki:frwiki.
-```
-
-Important distinction:
-
-```text
-This metric is not used to compute top N wikis globally.
-Top N wikis are served by the TOP_WIKIS read model.
-```
-
----
+Used for the `wiki:{wiki}` topic activity counter.
 
 ### 3c — Top wikis read model
 
-Metric family:
+```text
+metric_key = METRIC#TOP_WIKIS#SHARD#{0..9}
+window_key = WINDOW#{minute}#WIKI#{wiki}
+shard_id   = hash(wiki) % TOP_METRIC_SHARD_COUNT
+```
+
+The Broadcaster queries all shards in parallel, merges counts by wiki, sorts descending, and returns the configured top N.
+
+### 3d — Global change-type distribution
 
 ```text
-METRIC#TOP_WIKIS#SHARD#{0..9}
+metric_key = METRIC#CHANGE_TYPE#TYPE#{change_type}
+window_key = WINDOW#{minute}
 ```
 
-Example:
-
-```json
-{
-  "metric_key": "METRIC#TOP_WIKIS#SHARD#4",
-  "window_key": "WINDOW#2026-06-24T13:30:00Z#WIKI#frwiki",
-  "event_count": 18,
-  "wiki": "frwiki",
-  "window_start": "2026-06-24T13:30:00Z",
-  "last_updated_at": "2026-06-24T13:30:42.123456Z",
-  "ttl": 1782480642
-}
-```
-
-Write rule:
+### 3e — Per-wiki change-type distribution
 
 ```text
-shard_id = hash(wiki) % TOP_METRIC_SHARD_COUNT
+metric_key = METRIC#WIKI_CHANGE_TYPE#WIKI#{wiki}#TYPE#{change_type}
+window_key = WINDOW#{minute}
 ```
 
-Read rule:
+Used by `wiki:{wiki}` messages.
+
+### 3f — Global bot/human distribution
 
 ```text
-For each TOP_WIKIS shard:
-  Query metric_key = METRIC#TOP_WIKIS#SHARD#{n}
-  KeyCondition: begins_with(window_key, "WINDOW#{minute}#WIKI#")
-
-Then merge all shard results, sort by event_count descending, and return top N.
+METRIC#BOT_ACTIVITY#BOT#true  / WINDOW#{minute}
+METRIC#BOT_ACTIVITY#BOT#false / WINDOW#{minute}
 ```
-
-Purpose:
 
 ```text
-Efficient live dashboard top_wikis without scanning WIKI_ACTIVITY partitions.
+bot_ratio = bot_count / (bot_count + human_count)
 ```
 
----
-
-### 3d — Change type distribution
-
-Metric family:
+### 3g — Per-wiki bot/human distribution
 
 ```text
-METRIC#CHANGE_TYPE#TYPE#{change_type}
+METRIC#WIKI_BOT_ACTIVITY#WIKI#{wiki}#BOT#true  / WINDOW#{minute}
+METRIC#WIKI_BOT_ACTIVITY#WIKI#{wiki}#BOT#false / WINDOW#{minute}
 ```
 
-Possible values:
+### 3h — Global namespace distribution
 
 ```text
-edit
-new
-categorize
-log
-external
-unknown
-```
-
-Example:
-
-```json
-{
-  "metric_key": "METRIC#CHANGE_TYPE#TYPE#categorize",
-  "window_key": "WINDOW#2026-06-24T13:30:00Z",
-  "event_count": 35,
-  "change_type": "categorize",
-  "window_start": "2026-06-24T13:30:00Z",
-  "last_updated_at": "2026-06-24T13:30:42.123456Z",
-  "ttl": 1782480642
-}
-```
-
-Purpose:
-
-```text
-Count events by Wikimedia change type per 1-minute window.
-```
-
----
-
-### 3e — Bot activity
-
-Metric families:
-
-```text
-METRIC#BOT_ACTIVITY#BOT#true
-METRIC#BOT_ACTIVITY#BOT#false
-```
-
-Example:
-
-```json
-{
-  "metric_key": "METRIC#BOT_ACTIVITY#BOT#false",
-  "window_key": "WINDOW#2026-06-24T13:30:00Z",
-  "event_count": 72,
-  "is_bot": false,
-  "window_start": "2026-06-24T13:30:00Z",
-  "last_updated_at": "2026-06-24T13:30:42.123456Z",
-  "ttl": 1782480642
-}
-```
-
-Read rule:
-
-```text
-bot_count   = event_count for METRIC#BOT_ACTIVITY#BOT#true
-human_count = event_count for METRIC#BOT_ACTIVITY#BOT#false
-bot_ratio   = bot_count / (bot_count + human_count)
-```
-
----
-
-### 3f — Namespace distribution
-
-Metric family:
-
-```text
-METRIC#NAMESPACE#NS#{namespace}
-```
-
-Example:
-
-```json
-{
-  "metric_key": "METRIC#NAMESPACE#NS#0",
-  "window_key": "WINDOW#2026-06-24T13:30:00Z",
-  "event_count": 42,
-  "namespace": "0",
-  "window_start": "2026-06-24T13:30:00Z",
-  "last_updated_at": "2026-06-24T13:30:42.123456Z",
-  "ttl": 1782480642
-}
+metric_key = METRIC#NAMESPACE#NS#{namespace}
+window_key = WINDOW#{minute}
 ```
 
 Common namespace values:
@@ -569,76 +425,47 @@ Common namespace values:
 14  Category
 ```
 
-Purpose:
+### 3i — Per-wiki namespace distribution
 
 ```text
-Namespace distribution for the live dashboard.
+metric_key = METRIC#WIKI_NAMESPACE#WIKI#{wiki}#NS#{namespace}
+window_key = WINDOW#{minute}
 ```
 
----
-
-### 3g — Top pages read model
-
-Metric family:
-
-```text
-METRIC#TOP_PAGES#SHARD#{0..9}
-```
+### 3j — Top pages read model
 
 Only namespace `0` events are counted.
 
-Example:
-
-```json
-{
-  "metric_key": "METRIC#TOP_PAGES#SHARD#7",
-  "window_key": "WINDOW#2026-06-24T13:30:00Z#WIKI#enwiki#TITLE#b7e4a91c8d75",
-  "event_count": 6,
-  "wiki": "enwiki",
-  "title": "Scale AI",
-  "title_url": "https://en.wikipedia.org/wiki/Scale_AI",
-  "namespace": "0",
-  "last_change_type": "edit",
-  "last_seen_at": "2026-06-24T13:30:42.123456Z",
-  "window_start": "2026-06-24T13:30:00Z",
-  "last_updated_at": "2026-06-24T13:30:42.123456Z",
-  "ttl": 1782480642
-}
-```
-
-Write rule:
-
 ```text
-Only write when namespace == 0.
+metric_key    = METRIC#TOP_PAGES#SHARD#{0..9}
+window_key    = WINDOW#{minute}#WIKI#{wiki}#TITLE#{page_hash}
 page_identity = wiki + "#" + sanitized_title
-page_hash = sha256(page_identity)[:12]
-shard_id = hash(page_identity) % TOP_METRIC_SHARD_COUNT
+page_hash     = sha256(page_identity)[:12]
+shard_id      = hash(page_identity) % TOP_METRIC_SHARD_COUNT
 ```
 
-Read rule:
+Stored attributes include:
 
 ```text
-For each TOP_PAGES shard:
-  Query metric_key = METRIC#TOP_PAGES#SHARD#{n}
-  KeyCondition: begins_with(window_key, "WINDOW#{minute}#")
-
-Then merge all shard results, sort by event_count descending, and return top N.
+wiki
+title
+title_url
+namespace
+last_change_type
+last_seen_at
+window_start
+last_updated_at
+ttl
 ```
 
-Purpose:
-
-```text
-Live dashboard top_pages without relying on S3/Athena historical analytics.
-```
-
----
+The Broadcaster queries all TOP_PAGES shards in parallel, merges results, sorts by `event_count`, and returns the configured top N.
 
 ## Contract 4 — SQS FIFO Broadcast Signal
 
 **Producer:** Realtime Processor Lambda  
 **Consumer:** Broadcaster Lambda
 
-The Realtime Processor sends a broadcast signal after successful DynamoDB counter updates.
+The Realtime Processor sends a signal after successful DynamoDB counter updates.
 
 ### Message body
 
@@ -646,17 +473,39 @@ The Realtime Processor sends a broadcast signal after successful DynamoDB counte
 {
   "message_type": "aggregates.updated",
   "source": "realtime-processor",
-  "created_at": "2026-06-24T13:30:42Z",
-  "broadcast_window": "2026-06-24T13:30:40Z",
+  "created_at": "2026-07-27T16:44:53.814000Z",
+  "broadcast_window": "2026-07-27T16:44:51Z",
   "aggregation_windows": [
-    "2026-06-24T13:30:00Z"
-  ]
+    "2026-07-27T16:44:00Z"
+  ],
+  "event_timestamp_bounds_by_window": {
+    "2026-07-27T16:44:00Z": {
+      "oldest_event_timestamp_ms": 1785170692652,
+      "latest_event_timestamp_ms": 1785170693422
+    }
+  },
+  "oldest_event_timestamp_ms": 1785170692652,
+  "latest_event_timestamp_ms": 1785170693422
 }
 ```
 
-`aggregation_windows` is a list because one Lambda batch can contain events from more than one 1-minute window.
+`aggregation_windows` is a list because one Kinesis Lambda batch can contain records from more than one minute.
 
-### Current FIFO settings
+`event_timestamp_bounds_by_window` is the preferred source for freshness calculations. The top-level oldest/latest values are retained as a fallback and logging shortcut.
+
+### Message attributes
+
+When a valid OpenTelemetry context is active, the Processor injects:
+
+```text
+traceparent
+tracestate
+baggage
+```
+
+The Broadcaster extracts these attributes and continues the distributed trace.
+
+### FIFO settings
 
 ```text
 MessageGroupId         = realtime-broadcast
@@ -667,28 +516,34 @@ Example:
 
 ```text
 MessageGroupId         = realtime-broadcast
-MessageDeduplicationId = BROADCAST#2026-06-24T13:30:40Z
+MessageDeduplicationId = BROADCAST#2026-07-27T16:44:51Z
 ```
 
 ### Time concepts
 
 ```text
 aggregation_window = 1-minute DynamoDB counter window
-broadcast_window   = 5-second dashboard refresh trigger
+broadcast_window   = configurable dashboard trigger, currently 3 seconds
 ```
 
-The Realtime Processor updates minute counters continuously.
-
-The Broadcaster should push a live snapshot every 5 seconds.
-
----
+Several Processor invocations can update DynamoDB during the same broadcast window. SQS FIFO accepts at most one signal with the same deduplication ID during its deduplication interval.
 
 ## Contract 5 — WebSocket `stats.update`
 
 **Producer:** Broadcaster Lambda  
 **Consumer:** Frontend Dashboard
 
-The Broadcaster reads `realtime_aggregates`, builds a snapshot, and sends it to matching WebSocket connections.
+The Broadcaster reads current DynamoDB aggregates, builds a topic payload, and sends it to matching WebSocket connections.
+
+Freshness metadata is carried in each payload:
+
+```text
+latest_event_timestamp_ms
+oldest_event_timestamp_ms
+server_send_attempt_at_ms
+```
+
+`server_send_attempt_at_ms` is added immediately before each individual `PostToConnection` call, so it can differ between clients receiving the same logical update.
 
 ### Global topic message
 
@@ -696,15 +551,18 @@ The Broadcaster reads `realtime_aggregates`, builds a snapshot, and sends it to 
 {
   "type": "stats.update",
   "topic": "global",
-  "timestamp": "2026-06-24T13:30:40Z",
-  "aggregation_window": "2026-06-24T13:30:00Z",
-  "broadcast_window": "2026-06-24T13:30:40Z",
+  "timestamp": "2026-07-27T16:44:53Z",
+  "aggregation_window": "2026-07-27T16:44:00Z",
+  "broadcast_window": "2026-07-27T16:44:51Z",
   "is_partial_window": true,
+  "latest_event_timestamp_ms": 1785170693422,
+  "oldest_event_timestamp_ms": 1785170692652,
+  "server_send_attempt_at_ms": 1785170693812,
   "data": {
     "current_minute_events_so_far": 220,
     "bot_count": 80,
     "human_count": 140,
-    "bot_ratio": 0.36,
+    "bot_ratio": 0.3636,
     "top_wikis": [
       { "wiki": "commonswiki", "count": 90 },
       { "wiki": "enwiki", "count": 65 },
@@ -728,19 +586,15 @@ The Broadcaster reads `realtime_aggregates`, builds a snapshot, and sends it to 
         "wiki": "enwiki",
         "title": "Scale AI",
         "count": 6,
-        "url": "https://en.wikipedia.org/wiki/Scale_AI"
+        "url": "https://en.wikipedia.org/wiki/Scale_AI",
+        "title_url": "https://en.wikipedia.org/wiki/Scale_AI",
+        "namespace": "0",
+        "last_change_type": "edit",
+        "last_seen_at": "2026-07-27T16:44:52Z"
       }
     ]
   }
 }
-```
-
-Dashboard interpretation:
-
-```text
-current_minute_events_so_far  monotonically increases during the current minute
-is_partial_window             true when the current minute is still in progress
-broadcast_window              dashboard refresh trigger, not an aggregation window
 ```
 
 ### Wiki topic message
@@ -749,15 +603,64 @@ broadcast_window              dashboard refresh trigger, not an aggregation wind
 {
   "type": "stats.update",
   "topic": "wiki:frwiki",
-  "timestamp": "2026-06-24T13:30:40Z",
-  "aggregation_window": "2026-06-24T13:30:00Z",
-  "broadcast_window": "2026-06-24T13:30:40Z",
+  "timestamp": "2026-07-27T16:44:53Z",
+  "aggregation_window": "2026-07-27T16:44:00Z",
+  "broadcast_window": "2026-07-27T16:44:51Z",
   "is_partial_window": true,
+  "latest_event_timestamp_ms": 1785170693422,
+  "oldest_event_timestamp_ms": 1785170692652,
+  "server_send_attempt_at_ms": 1785170693812,
   "data": {
     "wiki": "frwiki",
-    "current_minute_events_so_far": 18
+    "current_minute_events_so_far": 18,
+    "bot_count": 4,
+    "human_count": 14,
+    "bot_ratio": 0.2222,
+    "top_wikis": [],
+    "change_types": {
+      "edit": 12,
+      "new": 1,
+      "categorize": 3,
+      "log": 2
+    },
+    "namespace_distribution": {
+      "0": 10,
+      "14": 3,
+      "-1": 2
+    },
+    "top_pages": []
   }
 }
+```
+
+### Top-pages topic message
+
+```json
+{
+  "type": "stats.update",
+  "topic": "top_pages",
+  "timestamp": "2026-07-27T16:44:53Z",
+  "aggregation_window": "2026-07-27T16:44:00Z",
+  "broadcast_window": "2026-07-27T16:44:51Z",
+  "is_partial_window": true,
+  "latest_event_timestamp_ms": 1785170693422,
+  "oldest_event_timestamp_ms": 1785170692652,
+  "server_send_attempt_at_ms": 1785170693812,
+  "data": {
+    "current_minute_events_so_far": 15,
+    "top_pages": []
+  }
+}
+```
+
+Dashboard interpretation:
+
+```text
+current_minute_events_so_far  increases while the minute is open
+is_partial_window             true while the aggregation minute is open
+broadcast_window              dashboard trigger bucket, not an aggregation bucket
+latest_event_timestamp_ms     source event time used for the primary freshness SLI
+server_send_attempt_at_ms     server timestamp immediately before postToConnection
 ```
 
 ---
@@ -772,6 +675,7 @@ Supported messages:
 ```json
 { "action": "subscribe", "topic": "global" }
 { "action": "subscribe", "topic": "wiki:frwiki" }
+{ "action": "subscribe", "topic": "top_pages" }
 { "action": "unsubscribe", "topic": "wiki:frwiki" }
 ```
 
@@ -780,15 +684,8 @@ Valid topics:
 ```text
 global
 wiki:{wiki_code}
-```
-
-Planned optional topic:
-
-```text
 top_pages
 ```
-
-If `top_pages` is exposed as a separate topic, it must be served from `METRIC#TOP_PAGES#SHARD#{n}`.
 
 ---
 
@@ -808,8 +705,8 @@ If `top_pages` is exposed as a separate topic, it must be served from `METRIC#TO
 
 ## Contract 8 — DynamoDB `websocket_connections`
 
-**Producer:** WebSocket Connect Handler Lambda, WebSocket Default Handler Lambda  
-**Consumers:** Broadcaster Lambda, WebSocket Disconnect Handler Lambda
+**Producers:** WebSocket Connect and Default Handler Lambdas  
+**Consumers:** Broadcaster and Disconnect Handler Lambdas
 
 ### Table key
 
@@ -822,13 +719,13 @@ PK = connection_id
 ```json
 {
   "connection_id": "Mn2Pc9dfPHcCEug=",
-  "connected_at": "2026-06-24T13:30:00Z",
+  "connected_at": "2026-07-27T16:44:00Z",
   "client_type": "dashboard",
   "topics": [
     "global",
     "wiki:frwiki"
   ],
-  "ttl": 1782487800
+  "ttl": 1785177840
 }
 ```
 
@@ -841,24 +738,20 @@ ttl = connected_at + 2 hours
 ### V1 access pattern
 
 ```text
-Broadcaster scans websocket_connections.
-Broadcaster filters topics inside Lambda.
+Broadcaster Scan with ProjectionExpression: connection_id, topics, ttl
+Broadcaster skips expired items
+Broadcaster groups connections by topic inside Lambda
 ```
-
-This is acceptable for portfolio-scale V1.
 
 ### V2 scaling option
 
-Add a `websocket_subscriptions` table:
-
 ```text
-PK = TOPIC#{topic}
+websocket_subscriptions table
+PK = TOPIC#{topic}#SHARD#{shard_id}
 SK = CONNECTION#{connection_id}
 ```
 
-This allows the Broadcaster to Query subscriptions by topic instead of scanning all connections.
-
----
+V2 replaces the table Scan with topic/shard Query operations and horizontally scaled fan-out workers.
 
 ## Contract 9 — DynamoDB `alert_state`
 
@@ -1098,7 +991,7 @@ The original Wikimedia event remains available inside `raw_event`.
 **Producer:** Glue Bronze-to-Silver ETL  
 **Consumers:** Athena, Glue Silver-to-Gold ETL
 
-Silver is cleaned, typed, columnar data derived from Bronze envelope fields and `payload`.
+Silver is cleaned, typed, columnar data derived from the current Bronze envelope.
 
 ```text
 Format      : Parquet
@@ -1106,7 +999,7 @@ Compression : SNAPPY
 Partition   : ingestion_date
 ```
 
-Fields:
+Output fields:
 
 ```text
 event_id
@@ -1135,9 +1028,26 @@ log_params
 wikimedia_rcid
 ```
 
-Silver does not need to preserve full `raw_event` because Bronze is the source-fidelity archive.
+Current Bronze-to-Silver source mapping:
 
----
+```text
+user_is_bot     ← payload.bot
+is_minor        ← payload.minor
+is_patrolled    ← payload.patrolled
+old_length      ← payload.length_old
+new_length      ← payload.length_new
+delta_bytes     ← payload.length_delta
+revision_old    ← payload.revision_old
+revision_new    ← payload.revision_new
+change_url      ← payload.change_url
+raw_notify_url  ← raw_event.notify_url
+log_type        ← raw_event.log_type
+log_action      ← raw_event.log_action
+log_params      ← raw_event.log_params serialized as JSON
+wikimedia_rcid  ← raw_event.id
+```
+
+Silver does not preserve the complete `raw_event`; Bronze remains the source-fidelity archive.
 
 ## Contract 13 — S3 Gold
 
@@ -1225,48 +1135,52 @@ Gold `activity_spikes` is historical analytics. It is independent from the real-
 ### Collector
 
 ```text
-DROP   if meta.id is missing
-DROP   if meta.dt is missing or unparseable
-DROP   if meta.domain == "canary"
-KEEP   all five change types
-EMBED  raw_event exactly as received
+DROP    if meta.id is missing
+DROP    if meta.dt is missing
+DROP    if meta.domain == "canary"
+SAMPLE  deterministically with SHA-256(event_id) and SAMPLE_RATE
+KEEP    all five change types
+EMBED   raw_event exactly as received
+BUFFER  normalized envelopes
+INJECT  optional W3C trace_context when building records for a flush
+WRITE   Kinesis PartitionKey = normalized event_id
 ```
 
 ### Realtime Processor
 
 ```text
-READ   Kinesis normalized envelope
-DROP   if event_type != wiki.recentchange
-DROP   if payload is missing or invalid
-DROP   if event_id is missing
-FALLBACK occurred_at to processing time only if malformed
-WRITE  realtime_aggregates with UpdateItem ADD
-WRITE  global, wiki, top_wikis, change_type, bot_activity, namespace
-WRITE  top_pages only when namespace == 0
-SEND   SQS FIFO broadcast signal after successful DynamoDB writes
+READ      Kinesis normalized envelope
+ACCEPT    event_type == wiki.recentchange, payload object, event_id present
+FALLBACK  malformed occurred_at to processing time
+NORMALIZE absent optional fields defensively
+AGGREGATE records in memory by metric_key/window_key
+WRITE     DynamoDB UpdateItem ADD with bounded parallelism
+WRITE     global and per-wiki activity/distributions
+WRITE     top_pages only when namespace == 0
+WAIT      for all DynamoDB writes before sending the signal
+SEND      SQS FIFO broadcast signal after successful DynamoDB writes
+PROPAGATE W3C trace context into SQS message attributes
 ```
 
 ### Broadcaster
 
 ```text
-READ   SQS broadcast signal
-READ   realtime_aggregates for the requested aggregation window
-READ   GLOBAL_ACTIVITY shards and sum them
-READ   BOT_ACTIVITY true/false and compute bot_ratio
-READ   CHANGE_TYPE known values
-READ   NAMESPACE known/common values
-READ   TOP_WIKIS shards and sort top N
-READ   TOP_PAGES shards and sort top N
-SCAN   websocket_connections in V1
-FILTER topics inside Lambda
-PUSH   stats.update to matching WebSocket connections
-DELETE stale connections on GoneException / 410
+READ     SQS broadcast signal and W3C message attributes
+SCAN     websocket_connections with projected attributes in V1
+FILTER   expired items and group subscriptions inside Lambda
+READ     exact counters with BatchGetItem
+QUERY    TOP_WIKIS and TOP_PAGES shards concurrently
+BUILD    global, wiki, and top_pages payloads
+PUSH     with bounded-parallel PostToConnection calls
+MEASURE  freshness after every successful server-side post
+DELETE   stale connections on GoneException / 410
 ```
 
 ### Alert Processor
 
 ```text
 READ   Kinesis normalized envelope directly
+READ   source-only log fields from raw_event when required
 WRITE  alert_state with UpdateItem ADD
 TRACK  event_count, log_count, delete_count, block_count
 QUERY  30-minute rolling window for global/wiki spikes
@@ -1280,11 +1194,13 @@ PUBLISH SNS only after conditional dedup reservation
 READ      Bronze Contract 2 envelope
 DROP      if event_id is null
 DROP      if occurred_at is null or unparseable
-KEEP      all 5 change_types
-CAST      user_is_bot to boolean
-CAST      is_minor to boolean, null if absent
-COMPUTE   delta_bytes only when both lengths are non-null
-SERIALIZE log_params as JSON string
-SELECT    known payload columns only
-PRESERVE  raw_event in Bronze; Silver does not need full raw_event by default
+KEEP      all five change types
+MAP       current payload field names to stable Silver column names
+READ      source-only fields from raw_event
+CAST      bot/minor/patrolled values to booleans
+USE       payload.length_delta for delta_bytes
+SERIALIZE raw_event.log_params as JSON string
+SELECT    known output columns only
+PRESERVE  complete raw_event in Bronze only
 ```
+

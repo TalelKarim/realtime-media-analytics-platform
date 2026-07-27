@@ -22,79 +22,68 @@ sequenceDiagram
   participant DSH as Frontend Dashboard
 
   Wiki->>Col: SSE event data JSON
-  Note over Col: Parse JSON<br/>Validate meta.id and meta.dt<br/>Drop meta.domain == canary<br/>Build normalized envelope<br/>Embed original raw_event
+  Note over Col: Validate meta.id/meta.dt<br/>Drop canary<br/>Deterministic SAMPLE_RATE<br/>Build normalized envelope<br/>Embed raw_event
 
-  Col->>Col: Buffer event
-  Note over Col: Flush when 100 events buffered<br/>OR 2 seconds elapsed<br/>OR shutdown signal received
+  Col->>Col: Append normalized event to buffer
+  Note over Col: Flush at 100 records<br/>OR 2 seconds<br/>OR shutdown
 
-  Col->>KDS: PutRecords envelope<br/>PartitionKey = hash(meta.id)
-  Note over KDS: Kinesis is the central fan-out backbone<br/>Consumers: Realtime Processor, Firehose, Alert Processor
+  Col->>Col: Start collector.flush_to_kinesis producer span<br/>Inject same W3C context into records of this flush
+  Col->>KDS: PutRecords envelopes<br/>PartitionKey = normalized event_id
 
   KDS->>RTP: Trigger Lambda with event batch
+  Note over RTP: Batch can contain records from multiple Collector flushes<br/>First unique producer context = parent<br/>Additional contexts = span links
 
-  loop For each normalized envelope in batch
-    RTP->>RTP: Read stable payload<br/>Compute aggregation_window = 1-minute bucket<br/>Aggregate counters in memory by metric_key/window_key
+  loop For each envelope
+    RTP->>RTP: Decode and normalize<br/>Compute 1-minute window<br/>Build counters in memory
   end
 
-  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#GLOBAL_ACTIVITY#SHARD#{hash(event_id)%10}<br/>SK=WINDOW#{aggregation_window}
-
-  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#WIKI_ACTIVITY#WIKI#{wiki}<br/>SK=WINDOW#{aggregation_window}
-
-  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#TOP_WIKIS#SHARD#{hash(wiki)%10}<br/>SK=WINDOW#{aggregation_window}#WIKI#{wiki}
-
-  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#CHANGE_TYPE#TYPE#{change_type}<br/>SK=WINDOW#{aggregation_window}
-
-  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#BOT_ACTIVITY#BOT#{true|false}<br/>SK=WINDOW#{aggregation_window}
-
-  RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#NAMESPACE#NS#{namespace}<br/>SK=WINDOW#{aggregation_window}
-
-  alt namespace == 0
-    RTP->>DDB: UpdateItem ADD event_count<br/>PK=METRIC#TOP_PAGES#SHARD#{hash(wiki#title)%10}<br/>SK=WINDOW#{aggregation_window}#WIKI#{wiki}#TITLE#{page_hash}
+  par Activity counters
+    RTP->>DDB: Global / wiki activity counters
+  and Change-type counters
+    RTP->>DDB: Global / wiki change-type counters
+  and Bot counters
+    RTP->>DDB: Global / wiki bot counters
+  and Namespace counters
+    RTP->>DDB: Global / wiki namespace counters
+  and Top read models
+    RTP->>DDB: TOP_WIKIS and namespace-0 TOP_PAGES counters
   end
 
-  RTP->>SQS: SendMessage<br/>aggregation_windows=[1-minute buckets]<br/>broadcast_window=5-second bucket<br/>MessageGroupId=realtime-broadcast<br/>DedupId=BROADCAST#{broadcast_window}
-  Note over SQS: Deduplicates broadcast triggers<br/>One broadcaster invocation per 5-second window<br/>No separate 5-second aggregate is stored
+  RTP->>SQS: SendMessage FIFO<br/>broadcast_window = 3-second bucket<br/>timestamp bounds by aggregation window<br/>W3C context in MessageAttributes<br/>GroupId=realtime-broadcast<br/>DedupId=BROADCAST#{broadcast_window}
+  Note over SQS: At most one signal per deduplication key<br/>No separate 3-second aggregate is stored
 
-  SQS->>BRD: Trigger Broadcaster Lambda
-
-  loop For each global shard 0..9
-    BRD->>DDB: GetItem<br/>PK=METRIC#GLOBAL_ACTIVITY#SHARD#{n}<br/>SK=WINDOW#{aggregation_window}
-  end
-
-  BRD->>BRD: Sum global shards<br/>Compute current_minute_events_so_far
-
-  BRD->>DDB: GetItem BOT_ACTIVITY true/false<br/>SK=WINDOW#{aggregation_window}
-  BRD->>BRD: Compute bot_ratio and human_count
-
-  BRD->>DDB: GetItem CHANGE_TYPE known values<br/>SK=WINDOW#{aggregation_window}
-  BRD->>DDB: GetItem NAMESPACE known/common values<br/>SK=WINDOW#{aggregation_window}
-
-  loop For each TOP_WIKIS shard 0..9
-    BRD->>DDB: Query<br/>PK=METRIC#TOP_WIKIS#SHARD#{n}<br/>begins_with(SK, WINDOW#{aggregation_window}#WIKI#)
-  end
-  BRD->>BRD: Merge and sort top_wikis by event_count
-
-  loop For each TOP_PAGES shard 0..9
-    BRD->>DDB: Query<br/>PK=METRIC#TOP_PAGES#SHARD#{n}<br/>begins_with(SK, WINDOW#{aggregation_window}#)
-  end
-  BRD->>BRD: Merge and sort top_pages by event_count
-
-  BRD->>DBC: Scan active websocket_connections
+  SQS->>BRD: Trigger Broadcaster Lambda batch_size=1
+  BRD->>DBC: Scan connection_id, topics, ttl
   DBC-->>BRD: Active connection items
-  BRD->>BRD: Filter subscribed topics in Lambda
+  BRD->>BRD: Skip expired items<br/>Group subscriptions by topic
 
-  loop For each matched connectionId
-    BRD->>AGW: postToConnection(connectionId, stats.update)
-    alt GoneException / HTTP 410
-      BRD->>DBC: DeleteItem stale connectionId
-    end
+  par Exact counters
+    BRD->>DDB: BatchGetItem exact global counters
+  and Top wikis
+    BRD->>DDB: Parallel Query TOP_WIKIS shards
+  and Top pages
+    BRD->>DDB: Parallel Query TOP_PAGES shards
+  and Active wiki topics
+    BRD->>DDB: BatchGetItem + parallel TOP_PAGES reads
+  end
+
+  BRD->>BRD: Build global/wiki/top_pages payloads
+
+  par Connection A
+    BRD->>AGW: postToConnection(connectionIdA, stats.update)
+  and Connection B
+    BRD->>AGW: postToConnection(connectionIdB, stats.update)
+  and Connection N
+    BRD->>AGW: postToConnection(connectionIdN, stats.update)
+  end
+
+  alt GoneException / HTTP 410
+    BRD->>DBC: DeleteItem stale connectionId
   end
 
   AGW->>DSH: stats.update JSON message
   DSH->>DSH: Update KPIs and live charts
 ```
-
----
 
 ## Diagram 2 — WebSocket Lifecycle
 
@@ -125,7 +114,7 @@ sequenceDiagram
   DEF->>AGW: postToConnection subscription.ack
   AGW-->>User: {"type":"subscription.ack","topic":"wiki:frwiki","status":"subscribed"}
 
-  Note over BRD,User: Next 5-second broadcast cycle
+  Note over BRD,User: Next configured broadcast cycle
 
   BRD->>DBC: Scan active websocket_connections
   DBC-->>BRD: Active connection items
@@ -170,13 +159,13 @@ sequenceDiagram
   GL1->>GL1: Read envelope-level fields and payload<br/>Drop invalid event_id or occurred_at<br/>Cast null-safe types<br/>Serialize log_params<br/>Select known fields for Silver
 
   GL1->>S3S: Write Parquet SNAPPY<br/>silver/wikimedia/recentchange/ingestion_date=D/
-  GL1->>CAT: Update Silver table partition metadata
+  Note over GL1,CAT: Silver table uses projected ingestion_date partitions
 
   GL2->>S3S: Read Silver partition
   GL2->>GL2: Aggregate top_wikis_by_hour<br/>Aggregate bot_vs_human_by_hour<br/>Aggregate change_type_distribution<br/>Aggregate top_pages_by_day<br/>Compute activity_spikes
 
   GL2->>S3G: Write Gold Parquet datasets
-  GL2->>CAT: Update Gold table partition metadata
+  Note over GL2,CAT: Gold tables use projected time partitions
 
   ATH->>S3G: SQL scan with partition pruning
   S3G-->>ATH: Parquet column data
@@ -333,4 +322,44 @@ sequenceDiagram
 
   KDS->>CW: IteratorAgeMilliseconds < 5 000 ms
   CW->>OPS: OK — alarm resolved
+```
+
+
+---
+
+## Diagram 7 — OpenTelemetry Trace Propagation
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Col as ECS Collector
+  participant Alloy as Grafana Alloy Sidecar
+  participant KDS as Kinesis
+  participant RTP as Realtime Processor
+  participant Ext1 as OTel Collector Extension
+  participant SQS as SQS FIFO
+  participant BRD as Broadcaster
+  participant Ext2 as OTel Collector Extension
+  participant GC as Grafana Cloud
+
+  Col->>Col: Start collector.flush_to_kinesis producer span
+  Col->>KDS: PutRecords with trace_context in each envelope
+  Col->>Alloy: Export Collector metrics and spans over OTLP
+  Alloy->>GC: Export to Mimir and Tempo
+
+  KDS->>RTP: Deliver Kinesis batch
+  RTP->>RTP: Extract producer contexts
+  Note over RTP: One direct parent<br/>Additional unique producer contexts become span links
+  RTP->>RTP: Process and update DynamoDB
+  RTP->>SQS: Send signal with traceparent/tracestate/baggage
+  RTP->>Ext1: Flush metrics and traces to localhost
+  Ext1->>GC: Export to Mimir and Tempo
+
+  SQS->>BRD: Deliver signal
+  BRD->>BRD: Extract W3C parent context
+  BRD->>BRD: Read aggregates and fan out
+  BRD->>Ext2: Flush metrics and traces to localhost
+  Ext2->>GC: Export to Mimir and Tempo
+
+  Note over Col,BRD: Trace continuity represents technical causality.<br/>Shared DynamoDB snapshots are not exact per-event lineage.
 ```

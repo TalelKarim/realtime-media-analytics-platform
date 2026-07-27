@@ -20,10 +20,10 @@ C4Context
   System_Ext(sns_email, "Email / SMS", "Alert notifications for anomaly detection")
 
   Rel(wikimedia, platform, "Streams recentchange events", "SSE / HTTPS")
-  Rel(platform, analyst, "Pushes real-time stats every ~5s", "WebSocket")
+  Rel(platform, analyst, "Pushes real-time stats every ~3s", "WebSocket")
   Rel(platform, quicksight, "Exposes historical data", "Athena / S3")
   Rel(platform, sns_email, "Sends spike alerts", "SNS")
-  Rel(ops, platform, "Monitors and operates", "CloudWatch / Terraform")
+  Rel(ops, platform, "Monitors and operates", "Grafana Cloud / CloudWatch / Terraform")
   Rel(analyst, quicksight, "Views historical dashboards", "HTTPS")
 ```
 
@@ -47,12 +47,19 @@ C4Container
   }
 
   Container_Boundary(realtime, "Real-Time Processing") {
-    Container(rt_processor, "Realtime Processor", "AWS Lambda", "Computes 1-minute aggregates and sends 5-second broadcast signals")
+    Container(rt_processor, "Realtime Processor", "AWS Lambda", "Computes 1-minute aggregates, executes bounded-parallel DynamoDB updates, and sends 3-second broadcast signals")
     Container(dynamodb, "DynamoDB", "AWS DynamoDB", "Stores real-time aggregates, WebSocket connections, and alert state")
-    Container(sqs, "Broadcast Signal Queue", "AWS SQS FIFO", "Deduplicates broadcast triggers by 5-second broadcast window")
-    Container(broadcaster, "Broadcaster", "AWS Lambda", "Reads aggregates, scans connections, filters topics in Lambda, pushes snapshots")
+    Container(sqs, "Broadcast Signal Queue", "AWS SQS FIFO", "Deduplicates broadcast triggers by 3-second broadcast window")
+    Container(broadcaster, "Broadcaster", "AWS Lambda", "Reads aggregates with bounded parallelism, scans connections, filters topics, and fans out snapshots with bounded parallelism")
     Container(apigw, "API Gateway WebSocket", "AWS API Gateway", "Manages persistent WebSocket connections with dashboard clients")
     Container(dashboard, "Live Dashboard", "React / WebSocket", "Real-time visualization of Wikimedia activity")
+  }
+
+  Container_Boundary(observability, "Observability") {
+    Container(alloy, "Grafana Alloy", "ECS sidecar", "Receives Collector OTLP telemetry and exports it to Grafana Cloud")
+    Container(otel_ext, "OTel Collector Lambda Extension", "Lambda extension", "Receives Processor and Broadcaster OTLP telemetry locally")
+    Container(grafana, "Grafana Cloud", "Mimir / Loki / Tempo", "Central metrics, logs, traces, dashboards, and alerting")
+    Container(cloudwatch, "CloudWatch", "AWS native telemetry", "Native AWS service metrics and application log groups")
   }
 
   Container_Boundary(historical, "Historical Analytics") {
@@ -73,9 +80,9 @@ C4Container
   Rel(kinesis, firehose, "Normalized envelopes", "Kinesis consumer")
   Rel(kinesis, alert_proc, "Event batches", "Kinesis trigger")
   Rel(rt_processor, dynamodb, "Atomic counter updates", "UpdateItem ADD")
-  Rel(rt_processor, sqs, "5-second broadcast signal", "SendMessage FIFO")
+  Rel(rt_processor, sqs, "3-second broadcast signal + W3C trace context", "SendMessage FIFO")
   Rel(sqs, broadcaster, "Deduplicated signal", "SQS trigger")
-  Rel(broadcaster, dynamodb, "Read aggregates + Scan connections", "GetItem + Scan + DeleteItem")
+  Rel(broadcaster, dynamodb, "Read aggregates + Scan connections", "BatchGetItem + Query + Scan + DeleteItem")
   Rel(broadcaster, apigw, "Push snapshots", "postToConnection")
   Rel(apigw, dashboard, "stats.update messages", "WebSocket")
   Rel(analyst, dashboard, "Views live metrics", "Browser")
@@ -84,5 +91,14 @@ C4Container
   Rel(athena, s3, "SQL scans", "S3 read")
   Rel(alert_proc, dynamodb, "Persist rolling state", "UpdateItem ADD + Query")
   Rel(alert_proc, sns, "Spike alerts", "Publish")
+  Rel(collector, alloy, "OTLP metrics and traces", "HTTP/protobuf")
+  Rel(rt_processor, otel_ext, "OTLP metrics and traces", "localhost:4318")
+  Rel(broadcaster, otel_ext, "OTLP metrics and traces", "localhost:4318")
+  Rel(alloy, grafana, "Export telemetry", "OTLP")
+  Rel(otel_ext, grafana, "Export telemetry", "OTLP")
+  Rel(cloudwatch, grafana, "AWS managed metrics", "Grafana AWS integration")
+  Rel(collector, cloudwatch, "Structured logs", "CloudWatch Logs")
+  Rel(rt_processor, cloudwatch, "Structured logs", "CloudWatch Logs")
+  Rel(broadcaster, cloudwatch, "Structured logs", "CloudWatch Logs")
 ```
 
