@@ -50,6 +50,15 @@ module "realtime_processor_lambda" {
     TOP_METRIC_SHARD_COUNT      = "10"
     AGGREGATE_TTL_DAYS          = "2"
 
+
+
+    DYNAMODB_WRITE_WORKERS           = "12"
+    DYNAMODB_MAX_POOL_CONNECTIONS    = "20"
+    DYNAMODB_CONNECT_TIMEOUT_SECONDS = "2"
+    DYNAMODB_READ_TIMEOUT_SECONDS    = "5"
+    DYNAMODB_RETRY_MAX_ATTEMPTS      = "4"
+
+
     OTEL_ENABLED      = "true"
     OTEL_SERVICE_NAME = "realtime-media-analytics-${var.environment}-realtime-processor"
 

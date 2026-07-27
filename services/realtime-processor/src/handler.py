@@ -4,10 +4,14 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from datetime import datetime, timezone
 from typing import Any
 
 import boto3
+from boto3.dynamodb.types import TypeSerializer
+from botocore.config import Config
 from opentelemetry import propagate, trace as otel_trace
 from opentelemetry.context import Context
 from opentelemetry.propagate import inject
@@ -33,6 +37,80 @@ from .observability import (
 )
 
 
+def _env_int(
+    name: str,
+    default: int,
+    minimum: int = 1,
+    maximum: int | None = None,
+) -> int:
+    """Read an integer environment variable defensively."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "invalid_integer_environment_variable: %s=%r",
+            name,
+            raw_value,
+        )
+        return default
+
+    if value < minimum:
+        logging.getLogger(__name__).warning(
+            "environment_variable_below_minimum: %s=%r minimum=%s",
+            name,
+            raw_value,
+            minimum,
+        )
+        return default
+
+    if maximum is not None and value > maximum:
+        logging.getLogger(__name__).warning(
+            "environment_variable_above_maximum: %s=%r maximum=%s",
+            name,
+            raw_value,
+            maximum,
+        )
+        return maximum
+
+    return value
+
+
+def _env_float(
+    name: str,
+    default: float,
+    minimum: float = 0.1,
+) -> float:
+    """Read a positive float environment variable defensively."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    try:
+        value = float(raw_value)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "invalid_float_environment_variable: %s=%r",
+            name,
+            raw_value,
+        )
+        return default
+
+    if value < minimum:
+        logging.getLogger(__name__).warning(
+            "environment_variable_below_minimum: %s=%r minimum=%s",
+            name,
+            raw_value,
+            minimum,
+        )
+        return default
+
+    return value
+
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "dev")
 
@@ -49,13 +127,60 @@ GLOBAL_ACTIVITY_SHARD_COUNT = int(os.getenv("GLOBAL_ACTIVITY_SHARD_COUNT", "10")
 TOP_METRIC_SHARD_COUNT = int(os.getenv("TOP_METRIC_SHARD_COUNT", "10"))
 AGGREGATE_TTL_DAYS = int(os.getenv("AGGREGATE_TTL_DAYS", "2"))
 
+# Bounded parallelism for DynamoDB UpdateItem calls. Start conservatively and
+# benchmark 4/8/12/16 workers before increasing further.
+DYNAMODB_WRITE_WORKERS = _env_int(
+    "DYNAMODB_WRITE_WORKERS",
+    12,
+    minimum=1,
+    maximum=32,
+)
+DYNAMODB_MAX_POOL_CONNECTIONS = _env_int(
+    "DYNAMODB_MAX_POOL_CONNECTIONS",
+    max(DYNAMODB_WRITE_WORKERS + 8, 20),
+    minimum=DYNAMODB_WRITE_WORKERS,
+    maximum=64,
+)
+DYNAMODB_CONNECT_TIMEOUT_SECONDS = _env_float(
+    "DYNAMODB_CONNECT_TIMEOUT_SECONDS",
+    2.0,
+)
+DYNAMODB_READ_TIMEOUT_SECONDS = _env_float(
+    "DYNAMODB_READ_TIMEOUT_SECONDS",
+    5.0,
+)
+DYNAMODB_RETRY_MAX_ATTEMPTS = _env_int(
+    "DYNAMODB_RETRY_MAX_ATTEMPTS",
+    4,
+    minimum=1,
+    maximum=8,
+)
+
 logger = logging.getLogger()
 logger.setLevel(LOG_LEVEL)
 
-dynamodb = boto3.resource("dynamodb")
+# Boto3 Resource objects are intentionally not used by worker threads.
+# One shared low-level client is created outside the handler; low-level clients
+# are the appropriate reusable interface for concurrent network calls.
+dynamodb_client = boto3.client(
+    "dynamodb",
+    config=Config(
+        max_pool_connections=DYNAMODB_MAX_POOL_CONNECTIONS,
+        connect_timeout=DYNAMODB_CONNECT_TIMEOUT_SECONDS,
+        read_timeout=DYNAMODB_READ_TIMEOUT_SECONDS,
+        retries={
+            "mode": "standard",
+            "max_attempts": DYNAMODB_RETRY_MAX_ATTEMPTS,
+        },
+    ),
+)
 sqs = boto3.client("sqs")
 
-table = dynamodb.Table(AGGREGATES_TABLE_NAME) if AGGREGATES_TABLE_NAME else None
+DYNAMODB_WRITE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=DYNAMODB_WRITE_WORKERS,
+    thread_name_prefix="ddb-write",
+)
+DYNAMODB_SERIALIZER = TypeSerializer()
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +687,30 @@ def _compute_global_event_timestamp_bounds(
 # DynamoDB update helpers
 # ---------------------------------------------------------------------------
 
+def _serialize_dynamodb_values(
+    values: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    return {
+        key: DYNAMODB_SERIALIZER.serialize(value)
+        for key, value in values.items()
+    }
+
+
+def _submit_with_context(
+    executor: ThreadPoolExecutor,
+    function: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Future:
+    """Propagate contextvars/OpenTelemetry into one worker thread."""
+    context = copy_context()
+
+    def runner() -> Any:
+        return function(*args, **kwargs)
+
+    return executor.submit(context.run, runner)
+
+
 def _update_counter(
     metric_key: str,
     window_key: str,
@@ -569,14 +718,15 @@ def _update_counter(
     now_iso: str,
     ttl: int,
     attrs: dict[str, Any] | None = None,
-) -> None:
+) -> tuple[str, str]:
+    """Atomically increment one aggregate counter with low-level DynamoDB."""
     expression_attribute_names = {
         "#event_count": "event_count",
         "#last_updated_at": "last_updated_at",
         "#ttl": "ttl",
     }
 
-    expression_attribute_values = {
+    expression_attribute_values: dict[str, Any] = {
         ":count": count,
         ":now": now_iso,
         ":ttl": ttl,
@@ -599,20 +749,25 @@ def _update_counter(
             expression_attribute_values[value_token] = attr_value
             set_expressions.append(f"{name_token} = {value_token}")
 
-    update_expression = f"""
-        ADD #event_count :count
-        SET {", ".join(set_expressions)}
-    """
+    update_expression = (
+        "ADD #event_count :count "
+        f"SET {', '.join(set_expressions)}"
+    )
 
-    table.update_item(
+    dynamodb_client.update_item(
+        TableName=AGGREGATES_TABLE_NAME,
         Key={
-            "metric_key": metric_key,
-            "window_key": window_key,
+            "metric_key": {"S": metric_key},
+            "window_key": {"S": window_key},
         },
         UpdateExpression=update_expression,
         ExpressionAttributeNames=expression_attribute_names,
-        ExpressionAttributeValues=expression_attribute_values,
+        ExpressionAttributeValues=_serialize_dynamodb_values(
+            expression_attribute_values
+        ),
     )
+
+    return metric_key, window_key
 
 
 # ---------------------------------------------------------------------------
@@ -932,8 +1087,8 @@ def lambda_handler(event, context):
             if not AGGREGATES_TABLE_NAME:
                 raise RuntimeError("Missing required env var: AGGREGATES_TABLE_NAME")
 
-            if table is None:
-                raise RuntimeError("DynamoDB table client is not initialized")
+            if dynamodb_client is None:
+                raise RuntimeError("DynamoDB client is not initialized")
 
             now = _utc_now()
             now_iso = _to_iso_z(now)
@@ -1042,35 +1197,60 @@ def lambda_handler(event, context):
             with tracer.start_as_current_span("realtime_processor.update_dynamodb_batch") as ddb_span:
                 ddb_span.set_attribute("dynamodb.table", AGGREGATES_TABLE_NAME)
                 ddb_span.set_attribute("dynamodb.counter_count", len(counters))
+                ddb_span.set_attribute(
+                    "dynamodb.write_workers",
+                    DYNAMODB_WRITE_WORKERS,
+                )
+                ddb_span.set_attribute(
+                    "dynamodb.max_pool_connections",
+                    DYNAMODB_MAX_POOL_CONNECTIONS,
+                )
 
                 try:
+                    future_to_key: dict[Future, tuple[str, str]] = {}
+
                     for (metric_key, window_key), counter_data in counters.items():
+                        future = _submit_with_context(
+                            DYNAMODB_WRITE_EXECUTOR,
+                            _update_counter,
+                            metric_key=metric_key,
+                            window_key=window_key,
+                            count=counter_data["count"],
+                            now_iso=now_iso,
+                            ttl=ttl,
+                            attrs=counter_data.get("attrs", {}),
+                        )
+                        future_to_key[future] = (metric_key, window_key)
+
+                    first_error: Exception | None = None
+                    failed_update_count = 0
+
+                    # Wait for every submitted request. This gives us an exact
+                    # success/failure count and prevents returning while worker
+                    # threads are still mutating DynamoDB.
+                    for future in as_completed(future_to_key):
+                        metric_key, window_key = future_to_key[future]
+
                         try:
-                            _update_counter(
-                                metric_key=metric_key,
-                                window_key=window_key,
-                                count=counter_data["count"],
-                                now_iso=now_iso,
-                                ttl=ttl,
-                                attrs=counter_data.get("attrs", {}),
+                            future.result()
+                            dynamodb_update_count += 1
+                            dynamodb_aggregate_updates_total.add(
+                                1,
+                                metric_base_attrs,
                             )
 
-                            dynamodb_update_count += 1
-                            dynamodb_aggregate_updates_total.add(1, metric_base_attrs)
-
                         except Exception as exc:
+                            failed_update_count += 1
                             failure_attrs = {
                                 **metric_base_attrs,
                                 "error_type": type(exc).__name__,
                             }
-                            dynamodb_aggregate_update_failure_total.add(1, failure_attrs)
+                            dynamodb_aggregate_update_failure_total.add(
+                                1,
+                                failure_attrs,
+                            )
 
                             ddb_span.record_exception(exc)
-                            ddb_span.set_attribute("dynamodb.failed_metric_key", metric_key)
-                            ddb_span.set_attribute("dynamodb.failed_window_key", window_key)
-                            ddb_span.set_attribute("error.type", type(exc).__name__)
-                            ddb_span.set_status(Status(StatusCode.ERROR, str(exc)))
-
                             log_exception(
                                 "dynamodb_update_failed",
                                 aws_request_id=aws_request_id,
@@ -1079,7 +1259,40 @@ def lambda_handler(event, context):
                                 error_type=type(exc).__name__,
                                 error_message=str(exc),
                             )
-                            raise
+
+                            if first_error is None:
+                                first_error = exc
+                                ddb_span.set_attribute(
+                                    "dynamodb.failed_metric_key",
+                                    metric_key,
+                                )
+                                ddb_span.set_attribute(
+                                    "dynamodb.failed_window_key",
+                                    window_key,
+                                )
+
+                    ddb_span.set_attribute(
+                        "dynamodb.write_workers",
+                        DYNAMODB_WRITE_WORKERS,
+                    )
+                    ddb_span.set_attribute(
+                        "dynamodb.max_pool_connections",
+                        DYNAMODB_MAX_POOL_CONNECTIONS,
+                    )
+                    ddb_span.set_attribute(
+                        "dynamodb.failed_update_count",
+                        failed_update_count,
+                    )
+
+                    if first_error is not None:
+                        ddb_span.set_attribute(
+                            "error.type",
+                            type(first_error).__name__,
+                        )
+                        ddb_span.set_status(
+                            Status(StatusCode.ERROR, str(first_error))
+                        )
+                        raise first_error
 
                     update_duration_ms = round((time.perf_counter() - update_start_time) * 1000, 2)
 
@@ -1170,6 +1383,8 @@ def lambda_handler(event, context):
                 oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                 latest_event_timestamp_ms=latest_event_timestamp_ms,
                 dynamodb_update_count=dynamodb_update_count,
+                dynamodb_write_workers=DYNAMODB_WRITE_WORKERS,
+                dynamodb_max_pool_connections=DYNAMODB_MAX_POOL_CONNECTIONS,
                 broadcast_signal_sent=broadcast_signal_sent,
                 duration_ms=duration_ms,
                 finops_write_reduction={
