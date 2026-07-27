@@ -7,6 +7,7 @@ GitHub and GitLab render Mermaid natively inside Markdown files.
 
 ## Diagram 1 — Full Ingestion to Live Dashboard
 
+
 ```mermaid
 sequenceDiagram
   autonumber
