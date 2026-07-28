@@ -217,7 +217,7 @@ variable "broadcast_jobs_max_receive_count" {
   default = 5
 }
 
-variable "broadcasting_v2_enabled" {
+variable "enhaned_broadcasting_enabled" {
   description = "Enable Coordinator and Worker SQS event source mappings."
   type        = bool
   default     = true

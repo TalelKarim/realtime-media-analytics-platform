@@ -94,14 +94,14 @@ module "lambda_broadcaster" {
   tags = var.tags
 }
 
-resource "aws_lambda_event_source_mapping" "broadcaster_sqs" {
-  event_source_arn = module.sqs.broadcast_signal_queue_arn
-  function_name    = module.lambda_broadcaster.function_name
+# resource "aws_lambda_event_source_mapping" "broadcaster_sqs" {
+#   event_source_arn = module.sqs.broadcast_signal_queue_arn
+#   function_name    = module.lambda_broadcaster.function_name
 
-  batch_size = 1
-  enabled    = true
+#   batch_size = 1
+#   enabled    = true
 
-  function_response_types = [
-    "ReportBatchItemFailures"
-  ]
-}
+#   function_response_types = [
+#     "ReportBatchItemFailures"
+#   ]
+# }
