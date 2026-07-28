@@ -155,10 +155,24 @@ broadcast_coordinator_payload_build_duration_ms = meter.create_histogram(
 
 
 def log_json(level: str, message: str, **fields: Any) -> None:
+    span_context = trace.get_current_span().get_span_context()
+
+    trace_id = None
+    span_id = None
+
+    if span_context.is_valid:
+        trace_id = format(span_context.trace_id, "032x")
+        span_id = format(span_context.span_id, "016x")
+
     log_method = getattr(logger, level.lower(), logger.info)
     log_method(
         json.dumps(
-            {"message": message, **fields},
+            {
+                "message": message,
+                "trace_id": trace_id,
+                "span_id": span_id,
+                **fields,
+            },
             default=str,
             separators=(",", ":"),
         )
