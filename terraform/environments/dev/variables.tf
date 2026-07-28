@@ -166,6 +166,9 @@ variable "grafana_external_id" {
 
 
 
+
+
+
 variable "grafana_otlp_endpoint" {
   type        = string
   description = "Grafana Cloud OTLP endpoint"

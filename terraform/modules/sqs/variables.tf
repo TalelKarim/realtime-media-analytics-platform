@@ -59,3 +59,51 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+
+
+
+variable "broadcast_jobs_visibility_timeout_seconds" {
+  description = "Visibility timeout for the broadcasting V2 jobs queue."
+  type        = number
+  default     = 180
+
+  validation {
+    condition = (
+      var.broadcast_jobs_visibility_timeout_seconds >= 0 &&
+      var.broadcast_jobs_visibility_timeout_seconds <= 43200
+    )
+
+    error_message = "broadcast_jobs_visibility_timeout_seconds must be between 0 and 43200 seconds."
+  }
+}
+
+variable "broadcast_jobs_message_retention_seconds" {
+  description = "How long broadcast Worker jobs are retained in the main queue."
+  type        = number
+  default     = 86400
+
+  validation {
+    condition = (
+      var.broadcast_jobs_message_retention_seconds >= 60 &&
+      var.broadcast_jobs_message_retention_seconds <= 1209600
+    )
+
+    error_message = "broadcast_jobs_message_retention_seconds must be between 60 and 1209600 seconds."
+  }
+}
+
+variable "broadcast_jobs_max_receive_count" {
+  description = "Number of failed Worker receives before a job is moved to the jobs DLQ."
+  type        = number
+  default     = 5
+
+  validation {
+    condition = (
+      var.broadcast_jobs_max_receive_count >= 1 &&
+      var.broadcast_jobs_max_receive_count <= 1000
+    )
+
+    error_message = "broadcast_jobs_max_receive_count must be between 1 and 1000."
+  }
+}

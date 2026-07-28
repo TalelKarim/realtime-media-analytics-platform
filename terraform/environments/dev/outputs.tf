@@ -182,6 +182,39 @@ output "sqs_broadcast_signal_dlq_arn" {
   value       = module.sqs.broadcast_signal_dlq_arn
 }
 
+
+output "sqs_broadcast_jobs_queue_name" {
+  description = "Name of the broadcasting V2 FIFO jobs queue."
+  value       = module.sqs.broadcast_jobs_queue_name
+}
+
+output "sqs_broadcast_jobs_queue_url" {
+  description = "URL of the broadcasting V2 FIFO jobs queue."
+  value       = module.sqs.broadcast_jobs_queue_url
+}
+
+output "sqs_broadcast_jobs_queue_arn" {
+  description = "ARN of the broadcasting V2 FIFO jobs queue."
+  value       = module.sqs.broadcast_jobs_queue_arn
+}
+
+output "sqs_broadcast_jobs_dlq_name" {
+  description = "Name of the broadcasting V2 jobs dead-letter FIFO queue."
+  value       = module.sqs.broadcast_jobs_dlq_name
+}
+
+output "sqs_broadcast_jobs_dlq_url" {
+  description = "URL of the broadcasting V2 jobs dead-letter FIFO queue."
+  value       = module.sqs.broadcast_jobs_dlq_url
+}
+
+output "sqs_broadcast_jobs_dlq_arn" {
+  description = "ARN of the broadcasting V2 jobs dead-letter FIFO queue."
+  value       = module.sqs.broadcast_jobs_dlq_arn
+}
+
+
+
 output "sns_alerts_topic_name" {
   description = "Name of the alerts SNS topic."
   value       = module.sns.alerts_topic_name
