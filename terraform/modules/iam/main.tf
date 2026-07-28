@@ -600,6 +600,7 @@ resource "aws_iam_role_policy" "broadcast_worker" {
 
 
 
+
 resource "aws_iam_role_policy" "websocket_connect" {
   name = "${local.name_prefix}-websocket-connect-policy"
   role = aws_iam_role.websocket_connect.id
