@@ -47,3 +47,14 @@ quicksight_principal_arn = "arn:aws:quicksight:us-east-1:156358246560:user/defau
 grafana_aws_account_id = "008923505280"
 grafana_external_id    = "3355686"
 
+
+
+
+# enhaned broadcasting 
+
+subscription_shard_count                  = 20
+broadcast_worker_max_concurrency          = 20
+broadcast_snapshot_ttl_seconds            = 900
+broadcast_jobs_visibility_timeout_seconds = 180
+broadcast_jobs_max_receive_count          = 5
+broadcasting_v2_enabled                   = true

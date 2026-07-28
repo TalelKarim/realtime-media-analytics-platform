@@ -134,6 +134,27 @@ output "dynamodb_alert_state_table_arn" {
 }
 
 
+output "dynamodb_websocket_subscriptions_table_name" {
+  description = "Name of the sharded WebSocket subscriptions DynamoDB table."
+  value       = module.dynamodb.websocket_subscriptions_table_name
+}
+
+output "dynamodb_websocket_subscriptions_table_arn" {
+  description = "ARN of the sharded WebSocket subscriptions DynamoDB table."
+  value       = module.dynamodb.websocket_subscriptions_table_arn
+}
+
+output "dynamodb_broadcast_snapshots_table_name" {
+  description = "Name of the broadcast snapshots DynamoDB table."
+  value       = module.dynamodb.broadcast_snapshots_table_name
+}
+
+output "dynamodb_broadcast_snapshots_table_arn" {
+  description = "ARN of the broadcast snapshots DynamoDB table."
+  value       = module.dynamodb.broadcast_snapshots_table_arn
+}
+
+
 # SQS AND SNS outputs
 
 output "sqs_broadcast_signal_queue_name" {
@@ -170,6 +191,9 @@ output "sns_alerts_topic_arn" {
   description = "ARN of the alerts SNS topic."
   value       = module.sns.alerts_topic_arn
 }
+
+
+
 
 
 
@@ -393,3 +417,6 @@ output "grafana_aws_integration_role_name" {
   description = "IAM role name used by Grafana Cloud."
   value       = module.grafana_aws_integration.role_name
 }
+
+
+

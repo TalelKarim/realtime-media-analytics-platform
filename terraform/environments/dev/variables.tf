@@ -175,3 +175,47 @@ variable "grafana_otlp_headers" {
   type        = string
   description = "Grafana Cloud OTLP auth headers"
 }
+
+
+variable "subscription_shard_count" {
+  description = "Number of logical subscription shards per WebSocket topic."
+  type        = number
+  default     = 20
+
+  validation {
+    condition = (
+      var.subscription_shard_count >= 1 &&
+      var.subscription_shard_count <= 100
+    )
+
+    error_message = "subscription_shard_count must be between 1 and 100."
+  }
+}
+
+variable "broadcast_worker_max_concurrency" {
+  description = "Maximum concurrent Worker Lambda invocations."
+  type        = number
+  default     = 20
+}
+
+variable "broadcast_snapshot_ttl_seconds" {
+  description = "Retention period for broadcast snapshots."
+  type        = number
+  default     = 900
+}
+
+variable "broadcast_jobs_visibility_timeout_seconds" {
+  type    = number
+  default = 180
+}
+
+variable "broadcast_jobs_max_receive_count" {
+  type    = number
+  default = 5
+}
+
+variable "broadcasting_v2_enabled" {
+  description = "Enable Coordinator and Worker SQS event source mappings."
+  type        = bool
+  default     = true
+}
