@@ -103,7 +103,8 @@ module "lambda_broadcast_coordinator" {
 
   tags = var.tags
 }
-  /tmp/broadcast-worker-fanout-v2/terraform-snippets/broadcast_worker_module.hcl
+
+
 module "lambda_broadcast_worker" {
   source = "../../modules/lambda"
 
