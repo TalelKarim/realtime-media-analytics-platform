@@ -84,7 +84,7 @@ output "queue_urls" {
   value = {
     broadcast_signal     = aws_sqs_queue.broadcast_signal.url
     broadcast_signal_dlq = aws_sqs_queue.broadcast_signal_dlq.url
-    broadcast_jobs       = _aws_sqs_queue.broadcast_jobs.url
+    broadcast_jobs       = aws_sqs_queue.broadcast_jobs.url
     broadcast_jobs_dlq   = aws_sqs_queue.broadcast_jobs_dlq.url
   }
 }
