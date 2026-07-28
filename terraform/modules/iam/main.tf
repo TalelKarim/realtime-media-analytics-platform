@@ -561,17 +561,6 @@ resource "aws_iam_role_policy" "broadcast_worker" {
         Resource = local.websocket_subscriptions_table_arn
       },
       {
-        Sid    = "UseSqsKmsKey"
-        Effect = "Allow"
-
-        Action = [
-          "kms:Decrypt",
-          "kms:DescribeKey"
-        ]
-
-        Resource = var.sqs_key_arn
-      },
-      {
         Sid    = "UseDynamoDbKmsKey"
         Effect = "Allow"
 
