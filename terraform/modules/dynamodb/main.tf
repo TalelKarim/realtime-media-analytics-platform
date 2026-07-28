@@ -35,7 +35,7 @@ resource "aws_dynamodb_table" "realtime_aggregates" {
   }
 
   ttl {
-    attribute_name = "expires_at"
+    attribute_name = "ttl"
     enabled        = true
   }
 
@@ -68,7 +68,7 @@ resource "aws_dynamodb_table" "websocket_connections" {
   }
 
   ttl {
-    attribute_name = "expires_at"
+    attribute_name = "ttl"
     enabled        = true
   }
 
@@ -107,7 +107,7 @@ resource "aws_dynamodb_table" "alert_state" {
   }
 
   ttl {
-    attribute_name = "expires_at"
+    attribute_name = "ttl"
     enabled        = true
   }
 
