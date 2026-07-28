@@ -49,6 +49,23 @@ module "lambda_broadcast_coordinator" {
 
     BACKBONE_TEST_MODE = "true"
 
+
+    AGGREGATES_TABLE_NAME = (
+      module.dynamodb.realtime_aggregates_table_name
+    )
+
+    GLOBAL_ACTIVITY_SHARD_COUNT = "10"
+    TOP_METRIC_SHARD_COUNT      = "10"
+
+    TOP_WIKIS_LIMIT = "10"
+    TOP_PAGES_LIMIT = "10"
+
+    DYNAMODB_READ_WORKERS          = "24"
+    DYNAMODB_MAX_POOL_CONNECTIONS  = "32"
+    DYNAMODB_BATCH_GET_MAX_RETRIES = "5"
+
+    CHANGE_TYPES      = "edit,new,categorize,log,external"
+    NAMESPACES        = "-1,0,1,2,4,6,10,14"
     OTEL_ENABLED      = "true"
     OTEL_SERVICE_NAME = "realtime-media-analytics-${var.environment}-broadcast-coordinator"
 

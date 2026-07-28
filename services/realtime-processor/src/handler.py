@@ -624,6 +624,23 @@ def _build_counters(
     return counters, aggregation_windows
 
 
+def _compute_updated_topics(
+    events: list[dict[str, Any]],
+) -> set[str]:
+    """Return the business topics whose aggregates changed in this batch."""
+    topics: set[str] = {"global"}
+
+    for event in events:
+        wiki = _safe_str(event.get("wiki"))
+        if wiki:
+            topics.add(f"wiki:{wiki.lower()}")
+
+        if _is_namespace_zero(event.get("namespace")):
+            topics.add("top_pages")
+
+    return topics
+
+
 def _compute_event_timestamp_bounds_by_window(
     events: list[dict[str, Any]],
 ) -> dict[str, dict[str, int]]:
@@ -799,6 +816,7 @@ def _otel_message_attributes_from_current_context() -> dict[str, dict[str, str]]
 
 def _send_broadcast_signal(
     aggregation_windows: set[str],
+    updated_topics: set[str],
     event_timestamp_bounds_by_window: dict[str, dict[str, int]],
     oldest_event_timestamp_ms: int | None,
     latest_event_timestamp_ms: int | None,
@@ -869,13 +887,17 @@ def _send_broadcast_signal(
 
         broadcast_window_start = _floor_time(now, BROADCAST_WINDOW_SECONDS)
         broadcast_window_iso = _to_iso_z(broadcast_window_start)
+        broadcast_sequence = int(broadcast_window_start.timestamp() * 1000)
 
         message_body = {
+            "schema_version": 2,
             "message_type": "aggregates.updated",
             "source": "realtime-processor",
             "created_at": _to_iso_z(now),
+            "sequence": broadcast_sequence,
             "broadcast_window": broadcast_window_iso,
             "aggregation_windows": sorted(aggregation_windows),
+            "updated_topics": sorted(updated_topics),
             "event_timestamp_bounds_by_window": event_timestamp_bounds_by_window,
             # Global values are kept as a convenient fallback/logging shortcut.
             # The broadcaster should prefer event_timestamp_bounds_by_window for SLO freshness.
@@ -883,10 +905,24 @@ def _send_broadcast_signal(
             "latest_event_timestamp_ms": latest_event_timestamp_ms,
         }
 
-        deduplication_id = f"BROADCAST#{broadcast_window_iso}"
+        deduplication_material = "|".join(
+            [
+                str(broadcast_sequence),
+                *sorted(aggregation_windows),
+                *sorted(updated_topics),
+            ]
+        )
+        deduplication_hash = hashlib.sha256(
+            deduplication_material.encode("utf-8")
+        ).hexdigest()[:32]
+        deduplication_id = (
+            f"BROADCAST#{broadcast_sequence}#{deduplication_hash}"
+        )
         message_attributes = _otel_message_attributes_from_current_context()
 
         span.set_attribute("broadcast.broadcast_window", broadcast_window_iso)
+        span.set_attribute("broadcast.sequence", broadcast_sequence)
+        span.set_attribute("broadcast.updated_topic_count", len(updated_topics))
         span.set_attribute("messaging.message.conversation_id", deduplication_id)
 
         try:
@@ -923,8 +959,11 @@ def _send_broadcast_signal(
                 "INFO",
                 "broadcast_signal_sent",
                 aws_request_id=aws_request_id,
+                sequence=broadcast_sequence,
                 broadcast_window=broadcast_window_iso,
                 aggregation_windows=sorted(aggregation_windows),
+                updated_topics=sorted(updated_topics),
+                updated_topic_count=len(updated_topics),
                 aggregation_window_count=len(aggregation_windows),
                 event_timestamp_bounds_by_window=event_timestamp_bounds_by_window,
                 oldest_event_timestamp_ms=oldest_event_timestamp_ms,
@@ -1162,6 +1201,7 @@ def lambda_handler(event, context):
 
             with tracer.start_as_current_span("realtime_processor.build_counters") as counters_span:
                 counters, aggregation_windows = _build_counters(normalized_events)
+                updated_topics = _compute_updated_topics(normalized_events)
                 event_timestamp_bounds_by_window = _compute_event_timestamp_bounds_by_window(
                     normalized_events
                 )
@@ -1171,6 +1211,7 @@ def lambda_handler(event, context):
 
                 counters_span.set_attribute("events.normalized_count", len(normalized_events))
                 counters_span.set_attribute("aggregation.window_count", len(aggregation_windows))
+                counters_span.set_attribute("broadcast.updated_topic_count", len(updated_topics))
                 counters_span.set_attribute("dynamodb.counter_count", len(counters))
                 counters_span.set_attribute(
                     "events.timestamp_bounds_window_count",
@@ -1323,6 +1364,7 @@ def lambda_handler(event, context):
             if valid_count > 0 and dynamodb_update_count > 0:
                 broadcast_signal_sent = _send_broadcast_signal(
                     aggregation_windows=aggregation_windows,
+                    updated_topics=updated_topics,
                     event_timestamp_bounds_by_window=event_timestamp_bounds_by_window,
                     oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                     latest_event_timestamp_ms=latest_event_timestamp_ms,
@@ -1379,6 +1421,8 @@ def lambda_handler(event, context):
                 skipped_count=skipped_count,
                 aggregation_windows=sorted(aggregation_windows),
                 aggregation_window_count=len(aggregation_windows),
+                updated_topics=sorted(updated_topics),
+                updated_topic_count=len(updated_topics),
                 event_timestamp_bounds_by_window=event_timestamp_bounds_by_window,
                 oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                 latest_event_timestamp_ms=latest_event_timestamp_ms,
@@ -1402,6 +1446,7 @@ def lambda_handler(event, context):
                 "dynamodb_update_count": dynamodb_update_count,
                 "broadcast_signal_sent": broadcast_signal_sent,
                 "aggregation_windows": sorted(aggregation_windows),
+                "updated_topics": sorted(updated_topics),
                 "event_timestamp_bounds_by_window": event_timestamp_bounds_by_window,
                 "oldest_event_timestamp_ms": oldest_event_timestamp_ms,
                 "latest_event_timestamp_ms": latest_event_timestamp_ms,

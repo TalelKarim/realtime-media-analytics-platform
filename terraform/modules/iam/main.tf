@@ -453,6 +453,18 @@ resource "aws_iam_role_policy" "broadcast_coordinator" {
         Resource = local.broadcast_snapshots_table_arn
       },
       {
+        Sid    = "ReadRealtimeAggregates"
+        Effect = "Allow"
+
+        Action = [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:DescribeTable"
+        ]
+
+        Resource = local.realtime_aggregates_table_arn
+      },
+      {
         Sid    = "PublishBroadcastJobs"
         Effect = "Allow"
 
