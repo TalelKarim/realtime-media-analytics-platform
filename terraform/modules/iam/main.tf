@@ -473,6 +473,20 @@ resource "aws_iam_role_policy" "broadcast_coordinator" {
         ]
 
         Resource = var.sqs_key_arn
+      },
+      {
+        Sid    = "UseDynamoDbKmsKey"
+        Effect = "Allow"
+
+        Action = [
+          "kms:Decrypt",
+          "kms:Encrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+
+        Resource = var.dynamodb_key_arn
       }
     ]
   })
@@ -545,6 +559,28 @@ resource "aws_iam_role_policy" "broadcast_worker" {
         ]
 
         Resource = local.websocket_subscriptions_table_arn
+      },
+      {
+        Sid    = "UseSqsKmsKey"
+        Effect = "Allow"
+
+        Action = [
+          "kms:Decrypt",
+          "kms:DescribeKey"
+        ]
+
+        Resource = var.sqs_key_arn
+      },
+      {
+        Sid    = "UseDynamoDbKmsKey"
+        Effect = "Allow"
+
+        Action = [
+          "kms:Decrypt",
+          "kms:DescribeKey"
+        ]
+
+        Resource = var.dynamodb_key_arn
       },
       {
         Sid    = "UseSqsKmsKey"
