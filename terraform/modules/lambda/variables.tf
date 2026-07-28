@@ -89,3 +89,20 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+
+
+variable "reserved_concurrent_executions" {
+  description = "Reserved concurrent executions for the Lambda function. Null means no reserved concurrency."
+  type        = number
+  default     = null
+
+  validation {
+    condition = (
+      var.reserved_concurrent_executions == null ||
+      var.reserved_concurrent_executions >= -1
+    )
+
+    error_message = "reserved_concurrent_executions must be null, -1, 0 or a positive number."
+  }
+}

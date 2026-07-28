@@ -11,24 +11,69 @@ locals {
     var.tags
   )
 
+
+
+
+
   kinesis_stream_name = coalesce(var.kinesis_stream_name, "${local.name_prefix}-wikimedia-events")
 
-  realtime_aggregates_table_name   = coalesce(var.realtime_aggregates_table_name, "${local.name_prefix}-realtime-aggregates")
-  websocket_connections_table_name = coalesce(var.websocket_connections_table_name, "${local.name_prefix}-websocket-connections")
-  alert_state_table_name           = coalesce(var.alert_state_table_name, "${local.name_prefix}-alert-state")
 
-  broadcast_queue_name = coalesce(var.broadcast_queue_name, "${local.name_prefix}-broadcast-signal.fifo")
+  realtime_aggregates_table_name = coalesce(
+    var.realtime_aggregates_table_name,
+    "${local.name_prefix}-realtime-aggregates"
+  )
+
+  websocket_connections_table_name = coalesce(
+    var.websocket_connections_table_name,
+    "${local.name_prefix}-websocket-connections"
+  )
+
+  websocket_subscriptions_table_name = coalesce(
+    var.websocket_subscriptions_table_name,
+    "${local.name_prefix}-websocket-subscriptions"
+  )
+
+  broadcast_snapshots_table_name = coalesce(
+    var.broadcast_snapshots_table_name,
+    "${local.name_prefix}-broadcast-snapshots"
+  )
+
+  alert_state_table_name = coalesce(
+    var.alert_state_table_name,
+    "${local.name_prefix}-alert-state"
+  )
+
+  broadcast_queue_name = coalesce(
+    var.broadcast_queue_name,
+    "${local.name_prefix}-broadcast-signal.fifo"
+  )
+
+  broadcast_jobs_queue_name = coalesce(
+    var.broadcast_jobs_queue_name,
+    "${local.name_prefix}-broadcast-jobs.fifo"
+  )
+
+
   alerts_topic_name    = coalesce(var.alerts_topic_name, "${local.name_prefix}-alerts")
   datalake_bucket_name = coalesce(var.datalake_bucket_name, "${local.name_prefix}-datalake-${data.aws_caller_identity.current.account_id}")
 
   kinesis_stream_arn = "arn:${data.aws_partition.current.partition}:kinesis:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:stream/${local.kinesis_stream_name}"
 
-  realtime_aggregates_table_arn   = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.realtime_aggregates_table_name}"
+
+  realtime_aggregates_table_arn = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.realtime_aggregates_table_name}"
+
   websocket_connections_table_arn = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.websocket_connections_table_name}"
-  alert_state_table_arn           = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.alert_state_table_name}"
+
+  websocket_subscriptions_table_arn = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.websocket_subscriptions_table_name}"
+
+  broadcast_snapshots_table_arn = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.broadcast_snapshots_table_name}"
+
+  alert_state_table_arn = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.alert_state_table_name}"
 
   broadcast_queue_arn = "arn:${data.aws_partition.current.partition}:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.broadcast_queue_name}"
-  alerts_topic_arn    = "arn:${data.aws_partition.current.partition}:sns:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.alerts_topic_name}"
+
+  broadcast_jobs_queue_arn = "arn:${data.aws_partition.current.partition}:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.broadcast_jobs_queue_name}"
+  alerts_topic_arn         = "arn:${data.aws_partition.current.partition}:sns:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${local.alerts_topic_name}"
 
   datalake_bucket_arn         = "arn:${data.aws_partition.current.partition}:s3:::${local.datalake_bucket_name}"
   datalake_bucket_objects_arn = "arn:${data.aws_partition.current.partition}:s3:::${local.datalake_bucket_name}/*"
@@ -173,6 +218,31 @@ resource "aws_iam_role" "broadcaster" {
   tags               = merge(local.common_tags, { Name = "${local.name_prefix}-broadcaster-role" })
 }
 
+
+resource "aws_iam_role" "broadcast_coordinator" {
+  name               = "${local.name_prefix}-broadcast-coordinator-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+
+  tags = merge(local.common_tags, {
+    Name         = "${local.name_prefix}-broadcast-coordinator-role"
+    Component    = "broadcasting"
+    Architecture = "coordinator-worker"
+  })
+}
+
+resource "aws_iam_role" "broadcast_worker" {
+  name               = "${local.name_prefix}-broadcast-worker-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+
+  tags = merge(local.common_tags, {
+    Name         = "${local.name_prefix}-broadcast-worker-role"
+    Component    = "broadcasting"
+    Architecture = "coordinator-worker"
+  })
+}
+
+
+
 resource "aws_iam_role" "websocket_connect" {
   name               = "${local.name_prefix}-websocket-connect-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
@@ -197,16 +267,21 @@ resource "aws_iam_role" "alert_processor" {
   tags               = merge(local.common_tags, { Name = "${local.name_prefix}-alert-processor-role" })
 }
 
+
 locals {
   lambda_roles = {
-    realtime_processor   = aws_iam_role.realtime_processor.name
-    broadcaster          = aws_iam_role.broadcaster.name
-    websocket_connect    = aws_iam_role.websocket_connect.name
-    websocket_disconnect = aws_iam_role.websocket_disconnect.name
-    websocket_default    = aws_iam_role.websocket_default.name
-    alert_processor      = aws_iam_role.alert_processor.name
+    realtime_processor    = aws_iam_role.realtime_processor.name
+    broadcaster           = aws_iam_role.broadcaster.name
+    broadcast_coordinator = aws_iam_role.broadcast_coordinator.name
+    broadcast_worker      = aws_iam_role.broadcast_worker.name
+    websocket_connect     = aws_iam_role.websocket_connect.name
+    websocket_disconnect  = aws_iam_role.websocket_disconnect.name
+    websocket_default     = aws_iam_role.websocket_default.name
+    alert_processor       = aws_iam_role.alert_processor.name
   }
 }
+
+
 
 resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
   for_each = local.lambda_roles
@@ -338,6 +413,159 @@ resource "aws_iam_role_policy" "broadcaster" {
     ]
   })
 }
+
+
+
+resource "aws_iam_role_policy" "broadcast_coordinator" {
+  name = "${local.name_prefix}-broadcast-coordinator-policy"
+  role = aws_iam_role.broadcast_coordinator.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Sid    = "ConsumeBroadcastSignals"
+        Effect = "Allow"
+
+        Action = [
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:ChangeMessageVisibility",
+          "sqs:GetQueueAttributes",
+          "sqs:GetQueueUrl"
+        ]
+
+        Resource = local.broadcast_queue_arn
+      },
+      {
+        Sid    = "WriteBroadcastSnapshots"
+        Effect = "Allow"
+
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:GetItem",
+          "dynamodb:DescribeTable"
+        ]
+
+        Resource = local.broadcast_snapshots_table_arn
+      },
+      {
+        Sid    = "PublishBroadcastJobs"
+        Effect = "Allow"
+
+        Action = [
+          "sqs:SendMessage",
+          "sqs:GetQueueAttributes",
+          "sqs:GetQueueUrl"
+        ]
+
+        Resource = local.broadcast_jobs_queue_arn
+      },
+      {
+        Sid    = "UseSqsKmsKey"
+        Effect = "Allow"
+
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey",
+          "kms:DescribeKey"
+        ]
+
+        Resource = var.sqs_key_arn
+      }
+    ]
+  })
+
+}
+
+
+resource "aws_iam_role_policy" "broadcast_worker" {
+  name = "${local.name_prefix}-broadcast-worker-policy"
+  role = aws_iam_role.broadcast_worker.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Sid    = "ConsumeBroadcastJobs"
+        Effect = "Allow"
+
+        Action = [
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:ChangeMessageVisibility",
+          "sqs:GetQueueAttributes",
+          "sqs:GetQueueUrl"
+        ]
+
+        Resource = local.broadcast_jobs_queue_arn
+      },
+      {
+        Sid    = "ReadBroadcastSnapshots"
+        Effect = "Allow"
+
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:DescribeTable"
+        ]
+
+        Resource = local.broadcast_snapshots_table_arn
+      },
+
+      {
+        Sid    = "ReadAndCleanupWebsocketConnections"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:Scan",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ]
+        Resource = local.websocket_connections_table_arn
+      },
+
+      {
+        Sid    = "ManageWebsocketConnections"
+        Effect = "Allow"
+        Action = [
+          "execute-api:ManageConnections"
+        ]
+        Resource = local.websocket_manage_connections_arn
+      },
+      {
+        Sid    = "QueryWebsocketSubscriptions"
+        Effect = "Allow"
+
+        Action = [
+          "dynamodb:Query",
+          "dynamodb:DescribeTable"
+        ]
+
+        Resource = local.websocket_subscriptions_table_arn
+      },
+      {
+        Sid    = "UseSqsKmsKey"
+        Effect = "Allow"
+
+        Action = [
+          "kms:Decrypt",
+          "kms:DescribeKey"
+        ]
+
+        Resource = var.sqs_key_arn
+      }
+    ]
+  })
+}
+
+
+
+
+
+
 
 resource "aws_iam_role_policy" "websocket_connect" {
   name = "${local.name_prefix}-websocket-connect-policy"

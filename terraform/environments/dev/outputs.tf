@@ -453,3 +453,26 @@ output "grafana_aws_integration_role_name" {
 
 
 
+
+
+
+
+output "broadcast_coordinator_function_name" {
+  description = "Broadcast Coordinator Lambda function name."
+  value       = module.lambda_broadcast_coordinator.function_name
+}
+
+output "broadcast_coordinator_function_arn" {
+  description = "Broadcast Coordinator Lambda function ARN."
+  value       = module.lambda_broadcast_coordinator.function_arn
+}
+
+output "broadcast_worker_function_name" {
+  description = "Broadcast Worker Lambda function name."
+  value       = module.lambda_broadcast_worker.function_name
+}
+
+output "broadcast_worker_function_arn" {
+  description = "Broadcast Worker Lambda function ARN."
+  value       = module.lambda_broadcast_worker.function_arn
+}

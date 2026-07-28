@@ -13,6 +13,8 @@ module "cloudwatch_log_groups" {
     "/aws/lambda/${var.project}-${var.environment}-realtime-processor",
     "/aws/lambda/${var.project}-${var.environment}-alert-processor",
     "/aws/lambda/${var.project}-${var.environment}-broadcaster",
+    "/aws/lambda/${var.project}-${var.environment}-broadcast-coordinator",
+    "/aws/lambda/${var.project}-${var.environment}-broadcast-worker",
 
     "/aws/lambda/${var.project}-${var.environment}-websocket-connect",
     "/aws/lambda/${var.project}-${var.environment}-websocket-disconnect",

@@ -9,6 +9,10 @@ locals {
   promtail_forwarded_log_groups = {
     broadcaster = "/aws/lambda/${var.project}-${var.environment}-broadcaster"
 
+    broadcast_coordinator = "/aws/lambda/${var.project}-${var.environment}-broadcast-coordinator"
+
+    broadcast_worker = "/aws/lambda/${var.project}-${var.environment}-broadcast-worker"
+
     realtime_processor = "/aws/lambda/${var.project}-${var.environment}-realtime-processor"
   }
 }
