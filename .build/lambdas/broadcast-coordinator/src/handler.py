@@ -12,6 +12,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterator
 
+
+from opentelemetry import propagate, trace 
+
+
 import boto3
 from boto3.dynamodb.types import TypeDeserializer
 from botocore.config import Config

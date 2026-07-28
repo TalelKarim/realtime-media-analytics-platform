@@ -507,7 +507,6 @@ resource "aws_iam_role_policy" "broadcast_coordinator" {
 
 }
 
-
 resource "aws_iam_role_policy" "broadcast_worker" {
   name = "${local.name_prefix}-broadcast-worker-policy"
   role = aws_iam_role.broadcast_worker.id
@@ -541,38 +540,32 @@ resource "aws_iam_role_policy" "broadcast_worker" {
 
         Resource = local.broadcast_snapshots_table_arn
       },
-
       {
-        Sid    = "ReadAndCleanupWebsocketConnections"
+        Sid    = "ReadAndCleanupWebsocketState"
         Effect = "Allow"
+
         Action = [
-          "dynamodb:GetItem",
           "dynamodb:Query",
-          "dynamodb:Scan",
+          "dynamodb:GetItem",
           "dynamodb:DeleteItem",
+          "dynamodb:TransactWriteItems",
           "dynamodb:DescribeTable"
         ]
-        Resource = local.websocket_connections_table_arn
-      },
 
+        Resource = [
+          local.websocket_connections_table_arn,
+          local.websocket_subscriptions_table_arn
+        ]
+      },
       {
-        Sid    = "ManageWebsocketConnections"
+        Sid    = "PushToWebsocketConnections"
         Effect = "Allow"
+
         Action = [
           "execute-api:ManageConnections"
         ]
+
         Resource = local.websocket_manage_connections_arn
-      },
-      {
-        Sid    = "QueryWebsocketSubscriptions"
-        Effect = "Allow"
-
-        Action = [
-          "dynamodb:Query",
-          "dynamodb:DescribeTable"
-        ]
-
-        Resource = local.websocket_subscriptions_table_arn
       },
       {
         Sid    = "UseDynamoDbKmsKey"
@@ -580,6 +573,8 @@ resource "aws_iam_role_policy" "broadcast_worker" {
 
         Action = [
           "kms:Decrypt",
+          "kms:Encrypt",
+          "kms:GenerateDataKey",
           "kms:DescribeKey"
         ]
 
@@ -599,7 +594,6 @@ resource "aws_iam_role_policy" "broadcast_worker" {
     ]
   })
 }
-
 
 
 
