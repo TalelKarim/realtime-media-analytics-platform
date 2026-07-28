@@ -60,11 +60,13 @@ locals {
   kinesis_stream_arn = "arn:${data.aws_partition.current.partition}:kinesis:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:stream/${local.kinesis_stream_name}"
 
 
-  realtime_aggregates_table_arn = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.realtime_aggregates_table_name}"
+
+
+  websocket_subscriptions_table_arn = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.websocket_subscriptions_table_name}"
+  realtime_aggregates_table_arn     = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.realtime_aggregates_table_name}"
 
   websocket_connections_table_arn = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.websocket_connections_table_name}"
 
-  websocket_subscriptions_table_arn = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.websocket_subscriptions_table_name}"
 
   broadcast_snapshots_table_arn = "arn:${data.aws_partition.current.partition}:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${local.broadcast_snapshots_table_name}"
 
@@ -598,26 +600,35 @@ resource "aws_iam_role_policy" "websocket_connect" {
 
   policy = jsonencode({
     Version = "2012-10-17"
+
     Statement = [
       {
-        Sid    = "StoreWebsocketConnection"
+        Sid    = "StoreWebsocketConnectionAndSubscription"
         Effect = "Allow"
+
         Action = [
           "dynamodb:PutItem",
           "dynamodb:UpdateItem",
+          "dynamodb:TransactWriteItems",
           "dynamodb:DescribeTable"
         ]
-        Resource = local.websocket_connections_table_arn
+
+        Resource = [
+          local.websocket_connections_table_arn,
+          local.websocket_subscriptions_table_arn
+        ]
       },
       {
         Sid    = "UseDynamoDbKmsKey"
         Effect = "Allow"
+
         Action = [
           "kms:Encrypt",
           "kms:GenerateDataKey",
           "kms:Decrypt",
           "kms:DescribeKey"
         ]
+
         Resource = var.dynamodb_key_arn
       }
     ]
@@ -630,28 +641,40 @@ resource "aws_iam_role_policy" "websocket_disconnect" {
 
   policy = jsonencode({
     Version = "2012-10-17"
+
     Statement = [
       {
-        Sid    = "DeleteWebsocketConnection"
+        Sid    = "DeleteWebsocketConnectionAndSubscriptions"
         Effect = "Allow"
+
         Action = [
+          "dynamodb:GetItem",
           "dynamodb:DeleteItem",
+          "dynamodb:TransactWriteItems",
           "dynamodb:DescribeTable"
         ]
-        Resource = local.websocket_connections_table_arn
+
+        Resource = [
+          local.websocket_connections_table_arn,
+          local.websocket_subscriptions_table_arn
+        ]
       },
       {
         Sid    = "UseDynamoDbKmsKey"
         Effect = "Allow"
+
         Action = [
           "kms:Decrypt",
           "kms:DescribeKey"
         ]
+
         Resource = var.dynamodb_key_arn
       }
     ]
   })
 }
+
+
 
 resource "aws_iam_role_policy" "websocket_default" {
   name = "${local.name_prefix}-websocket-default-policy"
@@ -659,40 +682,53 @@ resource "aws_iam_role_policy" "websocket_default" {
 
   policy = jsonencode({
     Version = "2012-10-17"
+
     Statement = [
       {
-        Sid    = "UpdateWebsocketSubscriptions"
+        Sid    = "ManageWebsocketConnectionAndSubscriptions"
         Effect = "Allow"
+
         Action = [
           "dynamodb:GetItem",
+          "dynamodb:PutItem",
           "dynamodb:UpdateItem",
           "dynamodb:DeleteItem",
+          "dynamodb:TransactWriteItems",
           "dynamodb:DescribeTable"
         ]
-        Resource = local.websocket_connections_table_arn
+
+        Resource = [
+          local.websocket_connections_table_arn,
+          local.websocket_subscriptions_table_arn
+        ]
       },
       {
         Sid    = "SendSubscriptionAck"
         Effect = "Allow"
+
         Action = [
           "execute-api:ManageConnections"
         ]
+
         Resource = local.websocket_manage_connections_arn
       },
       {
         Sid    = "UseRuntimeKmsKeys"
         Effect = "Allow"
+
         Action = [
           "kms:Decrypt",
           "kms:Encrypt",
           "kms:GenerateDataKey",
           "kms:DescribeKey"
         ]
+
         Resource = var.dynamodb_key_arn
       }
     ]
   })
 }
+
 
 resource "aws_iam_role_policy" "alert_processor" {
   name = "${local.name_prefix}-alert-processor-policy"
