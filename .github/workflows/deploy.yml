@@ -19,7 +19,7 @@ env:
 jobs:
   deploy:
     name: Build and deploy Realtime Dashboard
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout repository
