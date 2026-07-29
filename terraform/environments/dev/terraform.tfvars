@@ -54,7 +54,7 @@ grafana_external_id    = "3355686"
 
 subscription_shard_count                  = 3
 broadcast_worker_max_concurrency          = 20
-broadcast_shard_jobs_enabled             = false
+broadcast_shard_jobs_enabled             = true
 broadcast_snapshot_ttl_seconds            = 900
 broadcast_jobs_visibility_timeout_seconds = 180
 broadcast_jobs_max_receive_count          = 5
