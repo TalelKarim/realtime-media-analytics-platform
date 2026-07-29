@@ -32,6 +32,11 @@ module "lambda_websocket_connect" {
       module.dynamodb.websocket_subscriptions_table_name
     )
 
+    CONNECTION_SHARD_COUNT = tostring(
+      var.subscription_shard_count
+    )
+
+    # Legacy dual-write table remains active until Phase 2 validation.
     SUBSCRIPTION_SHARD_COUNT = tostring(
       var.subscription_shard_count
     )
@@ -77,6 +82,11 @@ module "lambda_websocket_disconnect" {
       module.dynamodb.websocket_subscriptions_table_name
     )
 
+    CONNECTION_SHARD_COUNT = tostring(
+      var.subscription_shard_count
+    )
+
+    # Legacy dual-write table remains active until Phase 2 validation.
     SUBSCRIPTION_SHARD_COUNT = tostring(
       var.subscription_shard_count
     )
@@ -119,6 +129,11 @@ module "lambda_websocket_default" {
       module.dynamodb.websocket_subscriptions_table_name
     )
 
+    CONNECTION_SHARD_COUNT = tostring(
+      var.subscription_shard_count
+    )
+
+    # Legacy dual-write table remains active until Phase 2 validation.
     SUBSCRIPTION_SHARD_COUNT = tostring(
       var.subscription_shard_count
     )

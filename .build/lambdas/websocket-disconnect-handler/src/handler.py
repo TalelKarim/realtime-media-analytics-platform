@@ -26,12 +26,18 @@ SUBSCRIPTIONS_TABLE_NAME = os.environ[
     "WEBSOCKET_SUBSCRIPTIONS_TABLE_NAME"
 ]
 
-SUBSCRIPTION_SHARD_COUNT = int(
+CONNECTION_SHARD_COUNT = int(
     os.getenv(
-        "SUBSCRIPTION_SHARD_COUNT",
-        "20",
+        "CONNECTION_SHARD_COUNT",
+        os.getenv(
+            "SUBSCRIPTION_SHARD_COUNT",
+            "20",
+        ),
     )
 )
+
+# Kept during Phase 1 because websocket_subscriptions is still dual-written.
+SUBSCRIPTION_SHARD_COUNT = CONNECTION_SHARD_COUNT
 
 ENVIRONMENT = os.getenv(
     "ENVIRONMENT",
@@ -224,7 +230,7 @@ def lambda_handler(
                 "subscription_shard",
                 calculate_subscription_shard(
                     connection_id,
-                    SUBSCRIPTION_SHARD_COUNT,
+                    CONNECTION_SHARD_COUNT,
                 ),
             )
         )
@@ -254,6 +260,7 @@ def lambda_handler(
             ),
             connection_id=connection_id,
             shard_id=shard_id,
+            connection_shard=f"SHARD#{shard_id:02d}",
             subscriptions_deleted=(
                 deleted_count
             ),

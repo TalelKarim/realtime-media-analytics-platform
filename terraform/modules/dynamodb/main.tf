@@ -77,6 +77,18 @@ resource "aws_dynamodb_table" "websocket_connections" {
     type = "S"
   }
 
+  attribute {
+    name = "connection_shard"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "connection-shard-index"
+    hash_key        = "connection_shard"
+    range_key       = "connection_id"
+    projection_type = "ALL"
+  }
+
   ttl {
     attribute_name = "ttl"
     enabled        = true
@@ -154,11 +166,20 @@ resource "aws_dynamodb_table" "websocket_subscriptions" {
 #   snapshot_id = SNAPSHOT#1785232803000#WINDOW#1785232800000
 #   topic       = global
 #
-# Future latest-state pointer:
-#   snapshot_id = LATEST
-#   topic       = global
+# Phase 1 shard-centric items:
+#   snapshot_id = SNAPSHOT#<sequence>#WINDOW#<epoch>#SIGNAL#<token>
+#   topic       = global | top_pages | wiki:<name>
 #
-# Items without the ttl attribute, such as LATEST pointers, are not expired.
+#   snapshot_id = MANIFEST#<sequence>#WINDOW#<epoch>#SIGNAL#<token>
+#   topic       = MANIFEST
+#
+#   snapshot_id = LATEST
+#   topic       = MANIFEST
+#
+#   snapshot_id = IDEMPOTENCY#<sha256>
+#   topic       = COORDINATOR
+#
+# Items without ttl, such as the LATEST pointer, are not expired.
 # =============================================================================
 
 resource "aws_dynamodb_table" "broadcast_snapshots" {

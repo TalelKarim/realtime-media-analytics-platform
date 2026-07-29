@@ -682,6 +682,64 @@ def _compute_event_timestamp_bounds_by_window(
     return bounds_by_window
 
 
+def _update_timestamp_bounds(
+    bounds: dict[str, int],
+    timestamp_ms: int,
+) -> None:
+    """Update one mutable oldest/latest timestamp pair."""
+    if not bounds:
+        bounds["oldest_event_timestamp_ms"] = timestamp_ms
+        bounds["latest_event_timestamp_ms"] = timestamp_ms
+        return
+
+    bounds["oldest_event_timestamp_ms"] = min(
+        bounds["oldest_event_timestamp_ms"],
+        timestamp_ms,
+    )
+    bounds["latest_event_timestamp_ms"] = max(
+        bounds["latest_event_timestamp_ms"],
+        timestamp_ms,
+    )
+
+
+def _compute_event_timestamp_bounds_by_topic_by_window(
+    events: list[dict[str, Any]],
+) -> dict[str, dict[str, dict[str, int]]]:
+    """
+    Compute source-event timestamp bounds for every business topic and window.
+
+    The Coordinator uses these values to put the correct freshness reference on
+    each snapshot instead of reusing one global timestamp for all topics.
+    """
+    result: dict[str, dict[str, dict[str, int]]] = {}
+
+    for event in events:
+        timestamp_ms = event.get("source_event_timestamp_ms")
+        if timestamp_ms is None:
+            timestamp_ms = _datetime_to_epoch_ms(event["occurred_dt"])
+
+        window_start = _floor_time(
+            event["occurred_dt"],
+            AGGREGATION_WINDOW_SECONDS,
+        )
+        window_start_iso = _to_iso_z(window_start)
+        topics_for_event = {"global"}
+
+        wiki = _safe_str(event.get("wiki"))
+        if wiki:
+            topics_for_event.add(f"wiki:{wiki.lower()}")
+
+        if _is_namespace_zero(event.get("namespace")):
+            topics_for_event.add("top_pages")
+
+        window_bounds = result.setdefault(window_start_iso, {})
+        for topic in topics_for_event:
+            topic_bounds = window_bounds.setdefault(topic, {})
+            _update_timestamp_bounds(topic_bounds, int(timestamp_ms))
+
+    return result
+
+
 def _compute_global_event_timestamp_bounds(
     event_timestamp_bounds_by_window: dict[str, dict[str, int]],
 ) -> tuple[int | None, int | None]:
@@ -818,6 +876,10 @@ def _send_broadcast_signal(
     aggregation_windows: set[str],
     updated_topics: set[str],
     event_timestamp_bounds_by_window: dict[str, dict[str, int]],
+    event_timestamp_bounds_by_topic_by_window: dict[
+        str,
+        dict[str, dict[str, int]],
+    ],
     oldest_event_timestamp_ms: int | None,
     latest_event_timestamp_ms: int | None,
     now: datetime,
@@ -835,6 +897,10 @@ def _send_broadcast_signal(
         span.set_attribute(
             "events.timestamp_bounds_window_count",
             len(event_timestamp_bounds_by_window),
+        )
+        span.set_attribute(
+            "events.topic_timestamp_bounds_window_count",
+            len(event_timestamp_bounds_by_topic_by_window),
         )
 
         if oldest_event_timestamp_ms is not None:
@@ -889,22 +955,10 @@ def _send_broadcast_signal(
         broadcast_window_iso = _to_iso_z(broadcast_window_start)
         broadcast_sequence = int(broadcast_window_start.timestamp() * 1000)
 
-        message_body = {
-            "schema_version": 2,
-            "message_type": "aggregates.updated",
-            "source": "realtime-processor",
-            "created_at": _to_iso_z(now),
-            "sequence": broadcast_sequence,
-            "broadcast_window": broadcast_window_iso,
-            "aggregation_windows": sorted(aggregation_windows),
-            "updated_topics": sorted(updated_topics),
-            "event_timestamp_bounds_by_window": event_timestamp_bounds_by_window,
-            # Global values are kept as a convenient fallback/logging shortcut.
-            # The broadcaster should prefer event_timestamp_bounds_by_window for SLO freshness.
-            "oldest_event_timestamp_ms": oldest_event_timestamp_ms,
-            "latest_event_timestamp_ms": latest_event_timestamp_ms,
-        }
-
+        # Keep the existing broadcast-window coalescing behaviour: two batches
+        # updating the same topic set in the same broadcast window share the
+        # same FIFO deduplication key. The per-topic timestamp map remains in
+        # the message body for precise snapshot freshness.
         deduplication_material = "|".join(
             [
                 str(broadcast_sequence),
@@ -918,6 +972,25 @@ def _send_broadcast_signal(
         deduplication_id = (
             f"BROADCAST#{broadcast_sequence}#{deduplication_hash}"
         )
+
+        message_body = {
+            "schema_version": 3,
+            "message_type": "aggregates.updated",
+            "signal_id": deduplication_id,
+            "source": "realtime-processor",
+            "created_at": _to_iso_z(now),
+            "sequence": broadcast_sequence,
+            "broadcast_window": broadcast_window_iso,
+            "aggregation_windows": sorted(aggregation_windows),
+            "updated_topics": sorted(updated_topics),
+            "event_timestamp_bounds_by_window": event_timestamp_bounds_by_window,
+            "event_timestamp_bounds_by_topic_by_window": (
+                event_timestamp_bounds_by_topic_by_window
+            ),
+            # Global values remain as a fallback for old consumers and logs.
+            "oldest_event_timestamp_ms": oldest_event_timestamp_ms,
+            "latest_event_timestamp_ms": latest_event_timestamp_ms,
+        }
         message_attributes = _otel_message_attributes_from_current_context()
 
         span.set_attribute("broadcast.broadcast_window", broadcast_window_iso)
@@ -966,6 +1039,9 @@ def _send_broadcast_signal(
                 updated_topic_count=len(updated_topics),
                 aggregation_window_count=len(aggregation_windows),
                 event_timestamp_bounds_by_window=event_timestamp_bounds_by_window,
+                event_timestamp_bounds_by_topic_by_window=(
+                    event_timestamp_bounds_by_topic_by_window
+                ),
                 oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                 latest_event_timestamp_ms=latest_event_timestamp_ms,
                 deduplication_id=deduplication_id,
@@ -1205,6 +1281,11 @@ def lambda_handler(event, context):
                 event_timestamp_bounds_by_window = _compute_event_timestamp_bounds_by_window(
                     normalized_events
                 )
+                event_timestamp_bounds_by_topic_by_window = (
+                    _compute_event_timestamp_bounds_by_topic_by_window(
+                        normalized_events
+                    )
+                )
                 oldest_event_timestamp_ms, latest_event_timestamp_ms = _compute_global_event_timestamp_bounds(
                     event_timestamp_bounds_by_window
                 )
@@ -1216,6 +1297,10 @@ def lambda_handler(event, context):
                 counters_span.set_attribute(
                     "events.timestamp_bounds_window_count",
                     len(event_timestamp_bounds_by_window),
+                )
+                counters_span.set_attribute(
+                    "events.topic_timestamp_bounds_window_count",
+                    len(event_timestamp_bounds_by_topic_by_window),
                 )
 
                 if oldest_event_timestamp_ms is not None:
@@ -1366,6 +1451,9 @@ def lambda_handler(event, context):
                     aggregation_windows=aggregation_windows,
                     updated_topics=updated_topics,
                     event_timestamp_bounds_by_window=event_timestamp_bounds_by_window,
+                    event_timestamp_bounds_by_topic_by_window=(
+                        event_timestamp_bounds_by_topic_by_window
+                    ),
                     oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                     latest_event_timestamp_ms=latest_event_timestamp_ms,
                     now=now,
@@ -1424,6 +1512,9 @@ def lambda_handler(event, context):
                 updated_topics=sorted(updated_topics),
                 updated_topic_count=len(updated_topics),
                 event_timestamp_bounds_by_window=event_timestamp_bounds_by_window,
+                event_timestamp_bounds_by_topic_by_window=(
+                    event_timestamp_bounds_by_topic_by_window
+                ),
                 oldest_event_timestamp_ms=oldest_event_timestamp_ms,
                 latest_event_timestamp_ms=latest_event_timestamp_ms,
                 dynamodb_update_count=dynamodb_update_count,
@@ -1448,6 +1539,9 @@ def lambda_handler(event, context):
                 "aggregation_windows": sorted(aggregation_windows),
                 "updated_topics": sorted(updated_topics),
                 "event_timestamp_bounds_by_window": event_timestamp_bounds_by_window,
+                "event_timestamp_bounds_by_topic_by_window": (
+                    event_timestamp_bounds_by_topic_by_window
+                ),
                 "oldest_event_timestamp_ms": oldest_event_timestamp_ms,
                 "latest_event_timestamp_ms": latest_event_timestamp_ms,
             }

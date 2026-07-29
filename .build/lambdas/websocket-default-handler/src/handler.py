@@ -29,12 +29,18 @@ SUBSCRIPTIONS_TABLE_NAME = os.environ[
     "WEBSOCKET_SUBSCRIPTIONS_TABLE_NAME"
 ]
 
-SUBSCRIPTION_SHARD_COUNT = int(
+CONNECTION_SHARD_COUNT = int(
     os.getenv(
-        "SUBSCRIPTION_SHARD_COUNT",
-        "20",
+        "CONNECTION_SHARD_COUNT",
+        os.getenv(
+            "SUBSCRIPTION_SHARD_COUNT",
+            "20",
+        ),
     )
 )
+
+# Kept during Phase 1 because websocket_subscriptions is still dual-written.
+SUBSCRIPTION_SHARD_COUNT = CONNECTION_SHARD_COUNT
 
 CONNECTION_TTL_SECONDS = int(
     os.getenv(
@@ -198,7 +204,7 @@ def _connection_state(
             "subscription_shard",
             calculate_subscription_shard(
                 connection_id,
-                SUBSCRIPTION_SHARD_COUNT,
+                CONNECTION_SHARD_COUNT,
             ),
         )
     )
@@ -258,8 +264,9 @@ def _write_subscription_change(
             "UpdateExpression": (
                 "SET #topics = :topics, "
                 "subscription_shard = "
-                "if_not_exists("
-                "subscription_shard, :shard)"
+                "if_not_exists(subscription_shard, :shard), "
+                "connection_shard = "
+                "if_not_exists(connection_shard, :connection_shard)"
             ),
             "ConditionExpression": (
                 "attribute_exists("
@@ -274,6 +281,9 @@ def _write_subscription_change(
                 ),
                 ":shard": serialize_value(
                     shard_id
+                ),
+                ":connection_shard": serialize_value(
+                    f"SHARD#{shard_id:02d}"
                 ),
             },
         }
@@ -754,6 +764,7 @@ def lambda_handler(
             topic=topic,
             shard_id=shard_id,
             topic_shard=topic_shard,
+            connection_shard=f"SHARD#{shard_id:02d}",
             topics=updated_topics,
             duration_ms=duration_ms,
         )

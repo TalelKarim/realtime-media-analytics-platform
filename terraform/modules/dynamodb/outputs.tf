@@ -26,6 +26,16 @@ output "websocket_connections_table_arn" {
   value       = aws_dynamodb_table.websocket_connections.arn
 }
 
+output "websocket_connections_connection_shard_index_name" {
+  description = "Name of the GSI used to query WebSocket connections by logical shard."
+  value       = "connection-shard-index"
+}
+
+output "websocket_connections_connection_shard_index_arn" {
+  description = "ARN of the GSI used to query WebSocket connections by logical shard."
+  value       = "${aws_dynamodb_table.websocket_connections.arn}/index/connection-shard-index"
+}
+
 # =============================================================================
 # WebSocket subscriptions V2
 # =============================================================================

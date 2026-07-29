@@ -195,6 +195,12 @@ variable "subscription_shard_count" {
   }
 }
 
+variable "broadcast_shard_jobs_enabled" {
+  description = "Publish shard-centric jobs and enable the new Worker mapping. Keep false during Phase 1."
+  type        = bool
+  default     = false
+}
+
 variable "broadcast_worker_max_concurrency" {
   description = "Maximum concurrent Worker Lambda invocations."
   type        = number

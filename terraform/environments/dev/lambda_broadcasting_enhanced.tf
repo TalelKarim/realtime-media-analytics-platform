@@ -39,16 +39,21 @@ module "lambda_broadcast_coordinator" {
     SNAPSHOTS_TABLE_NAME     = module.dynamodb.broadcast_snapshots_table_name
     BROADCAST_JOBS_QUEUE_URL = module.sqs.broadcast_jobs_queue_url
 
-    SUBSCRIPTION_SHARD_COUNT = tostring(
+    CONNECTION_SHARD_COUNT = tostring(
       var.subscription_shard_count
     )
+
+    # Phase 1 builds snapshots/manifests/LATEST but intentionally publishes no
+    # Worker jobs. Phase 2 flips this variable to true with the new Worker.
+    PUBLISH_SHARD_JOBS = tostring(
+      var.broadcast_shard_jobs_enabled
+    )
+
+    IDEMPOTENCY_LEASE_SECONDS = "60"
 
     SNAPSHOT_TTL_SECONDS = tostring(
       var.broadcast_snapshot_ttl_seconds
     )
-
-    BACKBONE_TEST_MODE = "true"
-
 
     AGGREGATES_TABLE_NAME = (
       module.dynamodb.realtime_aggregates_table_name

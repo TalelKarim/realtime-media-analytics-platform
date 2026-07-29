@@ -38,16 +38,17 @@ resource "aws_lambda_event_source_mapping" "broadcast_signal_to_coordinator" {
 # -----------------------------------------------------------------------------
 # broadcast-jobs.fifo -> Broadcast Worker
 #
-# One SQS message represents one topic-shard job.
+# Phase 2 contract: one SQS message represents one complete connection shard.
 #
 # Example MessageGroupIds:
-#   TOPIC#global#SHARD#00
-#   TOPIC#global#SHARD#01
+#   SHARD#00
+#   SHARD#01
 #   ...
-#   TOPIC#global#SHARD#19
+#   SHARD#19
 #
-# Different groups can be processed concurrently. Messages belonging to the
-# same topic-shard remain ordered.
+# Phase 1 keeps this mapping disabled because the current Worker still expects
+# the old topic-shard contract. Different connection shards will be processed
+# concurrently after Phase 2 is enabled.
 # -----------------------------------------------------------------------------
 
 resource "aws_lambda_event_source_mapping" "broadcast_jobs_to_worker" {
@@ -66,7 +67,10 @@ resource "aws_lambda_event_source_mapping" "broadcast_jobs_to_worker" {
     maximum_concurrency = var.broadcast_worker_max_concurrency
   }
 
-  enabled = var.enhaned_broadcasting_enabled
+  enabled = (
+    var.enhaned_broadcasting_enabled &&
+    var.broadcast_shard_jobs_enabled
+  )
 
   depends_on = [
     module.iam,

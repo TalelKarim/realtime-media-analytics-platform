@@ -33,12 +33,18 @@ CONNECTION_TTL_SECONDS = int(
     )
 )
 
-SUBSCRIPTION_SHARD_COUNT = int(
+CONNECTION_SHARD_COUNT = int(
     os.getenv(
-        "SUBSCRIPTION_SHARD_COUNT",
-        "20",
+        "CONNECTION_SHARD_COUNT",
+        os.getenv(
+            "SUBSCRIPTION_SHARD_COUNT",
+            "20",
+        ),
     )
 )
+
+# Kept during Phase 1 because websocket_subscriptions is still dual-written.
+SUBSCRIPTION_SHARD_COUNT = CONNECTION_SHARD_COUNT
 
 DEFAULT_TOPIC = normalize_topic(
     os.getenv(
@@ -107,8 +113,10 @@ def lambda_handler(
 
     shard_id = calculate_subscription_shard(
         connection_id,
-        SUBSCRIPTION_SHARD_COUNT,
+        CONNECTION_SHARD_COUNT,
     )
+
+    connection_shard = f"SHARD#{shard_id:02d}"
 
     topic_shard = build_topic_shard(
         DEFAULT_TOPIC,
@@ -123,6 +131,7 @@ def lambda_handler(
             DEFAULT_TOPIC
         ],
         "subscription_shard": shard_id,
+        "connection_shard": connection_shard,
         "ttl": ttl,
     }
 
@@ -180,6 +189,7 @@ def lambda_handler(
             topic=DEFAULT_TOPIC,
             shard_id=shard_id,
             topic_shard=topic_shard,
+            connection_shard=connection_shard,
             ttl=ttl,
             duration_ms=duration_ms,
         )
