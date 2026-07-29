@@ -69,7 +69,7 @@ resource "aws_lambda_event_source_mapping" "broadcast_jobs_to_worker" {
 
   enabled = (
     var.enhaned_broadcasting_enabled &&
-    var.heads/main
+    var.broadcast_shard_jobs_enabled
   )
 
   depends_on = [
