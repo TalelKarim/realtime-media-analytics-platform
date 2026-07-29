@@ -107,5 +107,5 @@ resource "aws_lambda_event_source_mapping" "realtime_processor_kinesis" {
   batch_size                         = 20
   maximum_batching_window_in_seconds = 1
 
-  enabled = true
+  enabled = false
 }
