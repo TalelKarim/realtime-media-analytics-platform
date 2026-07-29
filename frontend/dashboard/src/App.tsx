@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart3, Bot, BrainCircuit, Globe2, RadioTower, Settings2, Users } from 'lucide-react';
 import { ConnectionStatus } from './components/ConnectionStatus';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -15,9 +15,9 @@ import { TopPagesTable } from './components/charts/TopPagesTable';
 import { DEFAULT_SETTINGS, ENABLE_DEMO_DATA, LOCAL_STORAGE_KEYS, sanitizeWebSocketUrl } from './config';
 import { demoStats } from './lib/demoData';
 import { formatNumber, formatTime, topicLabel } from './lib/format';
-import { normalizeRealtimeMessage } from './lib/normalize';
+import { compareBroadcastCursors, extractBroadcastCursor, normalizeRealtimeMessages } from './lib/normalize';
 import { useRealtimeWebSocket } from './hooks/useRealtimeWebSocket';
-import type { DashboardSettings, EventLogEntry, RawRealtimeMessage, StatsSnapshot } from './types/realtime';
+import type { BroadcastCursor, DashboardSettings, EventLogEntry, RawRealtimeMessage, StatsSnapshot } from './types/realtime';
 
 const createLogId = (): string => {
   if ('crypto' in window && typeof window.crypto.randomUUID === 'function') {
@@ -67,6 +67,8 @@ const App = () => {
   const [selectedTopic, setSelectedTopic] = useState(settings.defaultTopics[0] ?? 'global');
   const [statsByTopic, setStatsByTopic] = useState<Record<string, StatsSnapshot>>(() => createInitialStats());
   const [logs, setLogs] = useState<EventLogEntry[]>([]);
+  // In-memory only: a refresh intentionally resets this cursor.
+  const latestBroadcastCursorRef = useRef<BroadcastCursor | null>(null);
 
   useEffect(() => {
     window.localStorage.setItem(LOCAL_STORAGE_KEYS.settings, JSON.stringify(settings));
@@ -84,7 +86,6 @@ const App = () => {
   }, []);
 
   const handleJsonMessage = useCallback((message: RawRealtimeMessage) => {
-    const normalized = normalizeRealtimeMessage(message);
     const rawType = String(message.type ?? message.action ?? 'message');
 
     if (message.error || rawType.toLowerCase().includes('error')) {
@@ -95,21 +96,49 @@ const App = () => {
       });
     }
 
-    if (!normalized) {
+    const incomingCursor = extractBroadcastCursor(message);
+    const latestCursor = latestBroadcastCursorRef.current;
+    if (incomingCursor && latestCursor && compareBroadcastCursors(incomingCursor, latestCursor) < 0) {
+      addLog({
+        level: 'warning',
+        message: 'Stale WebSocket update ignored',
+        details: `Incoming ${incomingCursor.sequence}/${incomingCursor.aggregationWindowEpochMs}, latest ${latestCursor.sequence}/${latestCursor.aggregationWindowEpochMs}`,
+      });
+      return;
+    }
+
+    if (!latestCursor || (incomingCursor && compareBroadcastCursors(incomingCursor, latestCursor) > 0)) {
+      latestBroadcastCursorRef.current = incomingCursor;
+    }
+
+    const normalizedMessages = normalizeRealtimeMessages(message);
+    if (normalizedMessages.length === 0) {
       if (!['pong', 'ack', 'subscribed', 'unsubscribed', 'heartbeat.ack'].includes(rawType.toLowerCase())) {
         addLog({ level: 'info', message: `Received ${rawType}`, details: JSON.stringify(message).slice(0, 280) });
       }
       return;
     }
 
-    setStatsByTopic((previousStats) => ({ ...previousStats, [normalized.topic]: normalized }));
-    setSelectedTopic((previousTopic) => previousTopic || normalized.topic);
+    setStatsByTopic((previousStats) => {
+      const nextStats = { ...previousStats };
+      for (const normalized of normalizedMessages) {
+        nextStats[normalized.topic] = normalized;
+      }
+      return nextStats;
+    });
+    setSelectedTopic((previousTopic) => previousTopic || normalizedMessages[0].topic);
+
+    const chunkIndex = Number(message.chunk_index ?? 0);
+    const chunkCount = Number(message.chunk_count ?? 1);
     addLog({
       level: 'success',
-      message: `stats.update received for ${normalized.topic}`,
-      details: `${formatNumber(normalized.eventCount)} event(s) in latest live window`,
+      message: `${rawType} received (${normalizedMessages.length} topic update(s))`,
+      details: chunkCount > 1
+        ? `Chunk ${chunkIndex + 1}/${chunkCount}, sequence ${String(message.sequence ?? 'legacy')}`
+        : `Sequence ${String(message.sequence ?? 'legacy')}`,
     });
   }, [addLog]);
+
 
   const ws = useRealtimeWebSocket({
     url: settings.wsUrl,
@@ -269,7 +298,7 @@ const App = () => {
             <section className="rounded-3xl border border-slate-800/90 bg-slate-950/85 p-5 backdrop-blur">
               <h2 className="text-lg font-semibold text-white">Backend contract health</h2>
               <p className="mt-1 text-sm leading-6 text-slate-400">
-                The frontend accepts tolerant field names, but the best production contract is a consistent <span className="font-mono text-slate-200">stats.update</span> message with event counts, bot/human, change types, namespaces and top pages for each topic.
+                The frontend accepts tolerant field names, but the production contract is <span className="font-mono text-slate-200">stats.batch_update</span>, with several topic updates batched per connection with event counts, bot/human, change types, namespaces and top pages for each topic.
               </p>
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <div className="rounded-2xl bg-slate-900/70 p-4 ring-1 ring-slate-800">

@@ -114,7 +114,7 @@ module "lambda_broadcast_worker" {
   source = "../../modules/lambda"
 
   function_name = "${local.name_prefix}-broadcast-worker"
-  description   = "Consumes one topic-shard job and performs bounded-parallel WebSocket fan-out"
+  description   = "Consumes one connection-shard job and sends batched topic updates per WebSocket connection"
 
   runtime = "python3.12"
   handler = "src.handler.lambda_handler"
@@ -148,6 +148,10 @@ module "lambda_broadcast_worker" {
       module.dynamodb.websocket_connections_table_name
     )
 
+    CONNECTION_SHARD_INDEX_NAME = (
+      module.dynamodb.websocket_connections_connection_shard_index_name
+    )
+
     WEBSOCKET_ENDPOINT_URL = (
       module.apigw_websocket.management_endpoint_url
     )
@@ -166,15 +170,18 @@ module "lambda_broadcast_worker" {
     APIGW_RETRY_MAX_DELAY_MS      = "250"
     APIGW_RETRY_JITTER_RATIO      = "0.25"
 
-    MAX_CLEANUP_WORKERS             = "8"
-    DYNAMODB_MAX_POOL_CONNECTIONS   = "16"
-    MAX_WEBSOCKET_PAYLOAD_BYTES     = "32000"
+    MAX_CLEANUP_WORKERS             = "4"
+    SNAPSHOT_READ_WORKERS           = "4"
+    DYNAMODB_MAX_POOL_CONNECTIONS   = "32"
+    DYNAMODB_BATCH_GET_MAX_RETRIES  = "5"
+    MAX_WEBSOCKET_PAYLOAD_BYTES     = "30000"
+    CHUNK_SIZE_SAFETY_BYTES         = "512"
     MAX_FAILURE_LOGS_PER_JOB        = "20"
-    # A partial delivery failure does not replay the complete shard: the next
-    # live snapshot will arrive shortly and freshness must not be polluted by
-    # stale duplicate sends. A total delivery outage still fails the SQS job.
+    # Individual delivery errors never replay the complete connection shard.
+    # Structural failures still fail the SQS job; fresh state supersedes old
+    # state and the frontend rejects older sequence/window cursors.
     FAIL_JOB_ON_POST_ERRORS         = "false"
-    FAIL_JOB_IF_NO_DELIVERIES       = "true"
+    FAIL_JOB_IF_NO_DELIVERIES       = "false"
     TRACE_POST_TO_CONNECTION_CALLS  = "false"
     BACKBONE_TEST_DELAY_MS          = "0"
 

@@ -1069,6 +1069,9 @@ def persist_snapshot(
         "schema_version": 3,
         "sequence": sequence,
         "aggregation_window": strip_window_prefix(aggregation_window),
+        "aggregation_window_epoch_ms": iso_to_epoch_ms(
+            strip_window_prefix(aggregation_window)
+        ),
         "broadcast_window": broadcast_window,
         "source_signal_id": source_signal_id,
         "created_at": now_iso(),
@@ -1101,6 +1104,9 @@ def persist_manifest(
         "schema_version": 3,
         "sequence": sequence,
         "aggregation_window": strip_window_prefix(aggregation_window),
+        "aggregation_window_epoch_ms": iso_to_epoch_ms(
+            strip_window_prefix(aggregation_window)
+        ),
         "broadcast_window": broadcast_window,
         "source_signal_id": source_signal_id,
         "updated_topics": sorted(snapshot_references),
@@ -1182,6 +1188,9 @@ def build_shard_jobs(
             "connection_shard": f"SHARD#{shard_id:02d}",
             "aggregation_window": strip_window_prefix(
                 aggregation_window
+            ),
+            "aggregation_window_epoch_ms": iso_to_epoch_ms(
+                strip_window_prefix(aggregation_window)
             ),
             "broadcast_window": broadcast_window,
             "created_at_ms": created_at_ms,
@@ -1292,7 +1301,6 @@ def process_signal(
 
     created_snapshots = 0
     manifest_ids: list[str] = []
-    all_jobs: list[dict[str, Any]] = []
     latest_manifest_candidate: tuple[int, str, str] | None = None
 
     try:
@@ -1424,14 +1432,6 @@ def process_signal(
             ):
                 latest_manifest_candidate = candidate
 
-            jobs = build_shard_jobs(
-                manifest_id=manifest_id,
-                sequence=sequence,
-                aggregation_window=aggregation_window,
-                broadcast_window=broadcast_window,
-            )
-            all_jobs.extend(jobs)
-
             log_json(
                 "INFO",
                 "broadcast_manifest_created",
@@ -1441,7 +1441,7 @@ def process_signal(
                 sequence=sequence,
                 aggregation_window=aggregation_window,
                 topic_count=len(snapshot_references),
-                jobs_planned=len(jobs),
+                realtime_delivery_candidate=True,
                 connection_shard_count=CONNECTION_SHARD_COUNT,
             )
 
@@ -1458,7 +1458,22 @@ def process_signal(
             source_signal_id=source_signal_id,
         )
 
-        jobs_planned = len(all_jobs)
+        # Real-time delivery is latest-state-only. Even when one signal carries
+        # several aggregation windows, publish exactly one job per connection
+        # shard for the newest manifest, never windows × shards jobs. If a newer
+        # pointer already won the conditional update, this signal publishes no
+        # stale work at all.
+        shard_jobs = (
+            build_shard_jobs(
+                manifest_id=latest_manifest_id,
+                sequence=sequence,
+                aggregation_window=latest_aggregation_window,
+                broadcast_window=broadcast_window,
+            )
+            if pointer_updated
+            else []
+        )
+        jobs_planned = len(shard_jobs)
         jobs_published = 0
         broadcast_jobs_planned_total.add(
             jobs_planned,
@@ -1466,7 +1481,7 @@ def process_signal(
         )
 
         if PUBLISH_SHARD_JOBS:
-            jobs_published = send_jobs(all_jobs)
+            jobs_published = send_jobs(shard_jobs)
             broadcast_jobs_created_total.add(
                 jobs_published,
                 {"environment": ENVIRONMENT},
@@ -1474,7 +1489,7 @@ def process_signal(
         else:
             log_json(
                 "INFO",
-                "broadcast_shard_jobs_publish_skipped_phase1",
+                "broadcast_shard_jobs_publish_skipped",
                 aws_request_id=aws_request_id,
                 sequence=sequence,
                 jobs_planned=jobs_planned,

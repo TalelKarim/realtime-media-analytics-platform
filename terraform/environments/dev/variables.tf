@@ -196,7 +196,7 @@ variable "subscription_shard_count" {
 }
 
 variable "broadcast_shard_jobs_enabled" {
-  description = "Publish shard-centric jobs and enable the new Worker mapping. Keep false during Phase 1."
+  description = "Publish shard-centric jobs and enable the Phase 2 Worker mapping after controlled validation."
   type        = bool
   default     = false
 }

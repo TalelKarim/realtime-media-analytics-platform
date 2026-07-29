@@ -25,33 +25,19 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
     raw_value = os.getenv(name)
     if raw_value is None:
         return default
-
     try:
         value = int(raw_value)
     except ValueError:
         logger.warning("invalid_integer_environment_variable: %s=%r", name, raw_value)
         return default
-
-    if value < minimum:
-        logger.warning(
-            "environment_variable_below_minimum: %s=%r minimum=%s",
-            name,
-            raw_value,
-            minimum,
-        )
-        return default
-
-    return value
+    return value if value >= minimum else default
 
 
 def setup_otel() -> None:
-    """Configure OTel without allowing telemetry failures to break fan-out."""
     global _initialized
-
     if _initialized:
         return
     _initialized = True
-
     if os.getenv("OTEL_ENABLED", "true").lower() != "true":
         logger.info("OpenTelemetry disabled with OTEL_ENABLED=false")
         return
@@ -63,7 +49,6 @@ def setup_otel() -> None:
             "OTEL_SERVICE_NAME",
             "realtime-media-analytics-broadcast-worker",
         )
-
         resource = Resource.create(
             {
                 "service.name": service_name,
@@ -78,18 +63,11 @@ def setup_otel() -> None:
         trace_provider.add_span_processor(
             BatchSpanProcessor(
                 OTLPSpanExporter(),
-                schedule_delay_millis=_env_int(
-                    "OTEL_BSP_SCHEDULE_DELAY_MS",
-                    5000,
-                ),
+                schedule_delay_millis=_env_int("OTEL_BSP_SCHEDULE_DELAY_MS", 5000),
                 max_export_batch_size=_env_int(
-                    "OTEL_BSP_MAX_EXPORT_BATCH_SIZE",
-                    128,
+                    "OTEL_BSP_MAX_EXPORT_BATCH_SIZE", 128
                 ),
-                max_queue_size=_env_int(
-                    "OTEL_BSP_MAX_QUEUE_SIZE",
-                    2048,
-                ),
+                max_queue_size=_env_int("OTEL_BSP_MAX_QUEUE_SIZE", 2048),
             )
         )
         trace.set_tracer_provider(trace_provider)
@@ -97,14 +75,10 @@ def setup_otel() -> None:
         metric_reader = PeriodicExportingMetricReader(
             OTLPMetricExporter(),
             export_interval_millis=_env_int(
-                "OTEL_METRIC_EXPORT_INTERVAL_MS",
-                10000,
+                "OTEL_METRIC_EXPORT_INTERVAL_MS", 10000
             ),
         )
-
-        # Keep the exact boundaries required by the existing freshness p95 and
-        # SLO < 10 s panels. In particular, 10_000 ms is an explicit bucket.
-        freshness_bucket_boundaries_ms = [
+        freshness_boundaries_ms = [
             0.0,
             1000.0,
             2000.0,
@@ -123,24 +97,22 @@ def setup_otel() -> None:
             90000.0,
             120000.0,
         ]
-
         views = [
             View(
                 instrument_name="event_to_dashboard_latency_ms",
                 aggregation=ExplicitBucketHistogramAggregation(
-                    boundaries=freshness_bucket_boundaries_ms,
+                    boundaries=freshness_boundaries_ms,
                     record_min_max=True,
                 ),
             ),
             View(
                 instrument_name="oldest_event_to_dashboard_latency_ms",
                 aggregation=ExplicitBucketHistogramAggregation(
-                    boundaries=freshness_bucket_boundaries_ms,
+                    boundaries=freshness_boundaries_ms,
                     record_min_max=True,
                 ),
             ),
         ]
-
         metrics.set_meter_provider(
             MeterProvider(
                 resource=resource,
@@ -148,165 +120,136 @@ def setup_otel() -> None:
                 views=views,
             )
         )
-
-        # DynamoDB calls remain instrumented. postToConnection calls are
-        # suppressed by default inside the handler to avoid one span per client.
         BotocoreInstrumentor().instrument()
-
         logger.info(
             "otel_initialized: service=%s endpoint=%s protocol=%s",
             service_name,
             os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "default"),
             os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "default"),
         )
-
-    except Exception as error:  # Observability must never break delivery.
+    except Exception as error:  # telemetry must never break delivery
         logger.warning("otel_setup_failed: %s", error)
 
 
 setup_otel()
-
 tracer = trace.get_tracer("realtime-media-analytics.broadcast-worker")
 meter = metrics.get_meter("realtime-media-analytics.broadcast-worker")
 
-# ---------------------------------------------------------------------------
-# Existing metric names retained for dashboard continuity.
-# ---------------------------------------------------------------------------
-
+# Delivery metrics retained for dashboard continuity.
 websocket_post_success_total = meter.create_counter(
-    name="websocket_post_success_total",
-    unit="1",
-    description="Successful API Gateway WebSocket postToConnection calls.",
+    "websocket_post_success_total", unit="1",
+    description="Successful API Gateway WebSocket postToConnection calls."
 )
-
 websocket_post_failure_total = meter.create_counter(
-    name="websocket_post_failure_total",
-    unit="1",
-    description="Failed postToConnection calls excluding GoneException.",
+    "websocket_post_failure_total", unit="1",
+    description="Failed postToConnection calls excluding HTTP 410."
 )
-
 websocket_connection_gone_total = meter.create_counter(
-    name="websocket_connection_gone_total",
-    unit="1",
-    description="Stale WebSocket connections detected with HTTP 410.",
+    "websocket_connection_gone_total", unit="1",
+    description="Stale WebSocket connections detected with HTTP 410."
 )
-
 websocket_messages_sent_total = meter.create_counter(
-    name="websocket_messages_sent_total",
-    unit="1",
-    description="WebSocket dashboard messages successfully sent.",
+    "websocket_messages_sent_total", unit="1",
+    description="WebSocket chunks successfully accepted by API Gateway."
 )
-
 websocket_post_duration_ms = meter.create_histogram(
-    name="websocket_post_duration_ms",
-    unit="ms",
-    description="Duration of one postToConnection including local retries.",
+    "websocket_post_duration_ms", unit="ms",
+    description="Duration of one postToConnection including bounded retries."
 )
-
 event_to_dashboard_latency_ms = meter.create_histogram(
-    name="event_to_dashboard_latency_ms",
-    unit="ms",
+    "event_to_dashboard_latency_ms", unit="ms",
     description=(
-        "Latency between the latest source event included in a snapshot and a "
-        "successful postToConnection. This is the primary freshness SLI."
-    ),
+        "Primary freshness: successful WebSocket send time minus the earliest "
+        "latest_event_timestamp_ms among topics contained in that chunk."
+    )
 )
-
 oldest_event_to_dashboard_latency_ms = meter.create_histogram(
-    name="oldest_event_to_dashboard_latency_ms",
-    unit="ms",
+    "oldest_event_to_dashboard_latency_ms", unit="ms",
     description=(
-        "Diagnostic latency between the oldest source event included in a "
-        "snapshot and a successful postToConnection."
-    ),
+        "Diagnostic latency: successful WebSocket send time minus the oldest "
+        "source event timestamp contained in that chunk."
+    )
 )
-
 fanout_duration_ms = meter.create_histogram(
-    name="fanout_duration_ms",
-    unit="ms",
-    description="Duration of one bounded-parallel Worker fan-out.",
+    "fanout_duration_ms", unit="ms",
+    description="Duration of one bounded-parallel connection-shard fan-out."
 )
-
 fanout_batch_size = meter.create_histogram(
-    name="fanout_batch_size",
-    unit="1",
-    description="Number of WebSocket connections attempted by one Worker job.",
+    "fanout_batch_size", unit="1",
+    description="Connections with at least one update in one Worker job."
 )
-
 gone_cleanup_duration_ms = meter.create_histogram(
-    name="gone_cleanup_duration_ms",
-    unit="ms",
-    description="Duration of stale WebSocket state cleanup after HTTP 410.",
+    "gone_cleanup_duration_ms", unit="ms",
+    description="Duration of stale WebSocket state cleanup after HTTP 410."
 )
-
-# ---------------------------------------------------------------------------
-# Worker-specific metrics.
-# ---------------------------------------------------------------------------
 
 broadcast_worker_jobs_total = meter.create_counter(
-    name="broadcast_worker_jobs_total",
-    unit="1",
-    description="Broadcast shard jobs completed successfully.",
+    "broadcast_worker_jobs_total", unit="1",
+    description="Shard-centric Worker jobs completed or stale-skipped."
 )
-
 broadcast_worker_jobs_failed_total = meter.create_counter(
-    name="broadcast_worker_jobs_failed_total",
-    unit="1",
-    description="Broadcast shard jobs returned to SQS after failure.",
+    "broadcast_worker_jobs_failed_total", unit="1",
+    description="Structurally failed Worker jobs returned to SQS."
 )
-
-broadcast_worker_subscriptions_found = meter.create_histogram(
-    name="broadcast_worker_subscriptions_found",
-    unit="1",
-    description="Active subscriptions found for one topic-shard.",
+stale_broadcast_jobs_skipped_total = meter.create_counter(
+    "stale_broadcast_jobs_skipped_total", unit="1",
+    description="Jobs skipped because LATEST already points to a newer state."
 )
-
+broadcast_worker_connections_found = meter.create_histogram(
+    "broadcast_worker_connections_found", unit="1",
+    description="Active connections returned by the connection-shard GSI Query."
+)
+broadcast_worker_topics_loaded = meter.create_histogram(
+    "broadcast_worker_topics_loaded", unit="1",
+    description="Distinct topic snapshots loaded for one connection shard."
+)
 broadcast_worker_duration_ms = meter.create_histogram(
-    name="broadcast_worker_duration_ms",
-    unit="ms",
-    description="End-to-end Worker job duration excluding bounded OTel flush.",
+    "broadcast_worker_duration_ms", unit="ms",
+    description="Worker job duration excluding the bounded OTel flush."
 )
-
+broadcast_worker_manifest_read_duration_ms = meter.create_histogram(
+    "broadcast_worker_manifest_read_duration_ms", unit="ms",
+    description="Duration of the strongly consistent manifest GetItem."
+)
 broadcast_worker_snapshot_read_duration_ms = meter.create_histogram(
-    name="broadcast_worker_snapshot_read_duration_ms",
-    unit="ms",
-    description="Duration of the broadcast snapshot GetItem.",
+    "broadcast_worker_snapshot_read_duration_ms", unit="ms",
+    description="Duration of snapshot BatchGetItem operations."
 )
-
 broadcast_worker_query_duration_ms = meter.create_histogram(
-    name="broadcast_worker_query_duration_ms",
-    unit="ms",
-    description="Duration of the paginated topic-shard subscription Query.",
+    "broadcast_worker_query_duration_ms", unit="ms",
+    description="Duration of the paginated connection-shard GSI Query."
 )
-
 broadcast_job_queue_delay_ms = meter.create_histogram(
-    name="broadcast_job_queue_delay_ms",
-    unit="ms",
-    description="Delay between Coordinator job creation and Worker start.",
+    "broadcast_job_queue_delay_ms", unit="ms",
+    description="Delay between Coordinator job creation and Worker start."
 )
-
 websocket_payload_size_bytes = meter.create_histogram(
-    name="websocket_payload_size_bytes",
-    unit="By",
-    description="Serialized WebSocket message size.",
+    "websocket_payload_size_bytes", unit="By",
+    description="Serialized WebSocket chunk size."
 )
-
+websocket_payload_build_failure_total = meter.create_counter(
+    "websocket_payload_build_failure_total", unit="1",
+    description="Connections skipped because one topic update could not fit safely."
+)
+websocket_batch_topics_count = meter.create_histogram(
+    "websocket_batch_topics_count", unit="1",
+    description="Number of topic updates contained in one WebSocket chunk."
+)
+websocket_chunks_per_connection = meter.create_histogram(
+    "websocket_chunks_per_connection", unit="1",
+    description="Chunks planned for one connection in one broadcast."
+)
 websocket_post_retry_total = meter.create_counter(
-    name="websocket_post_retry_total",
-    unit="1",
-    description="Additional postToConnection attempts after a retryable error.",
+    "websocket_post_retry_total", unit="1",
+    description="Additional postToConnection attempts after retryable errors."
 )
-
 websocket_post_retry_exhausted_total = meter.create_counter(
-    name="websocket_post_retry_exhausted_total",
-    unit="1",
-    description="Connections still failing after all local retry attempts.",
+    "websocket_post_retry_exhausted_total", unit="1",
+    description="Chunks still failing after all bounded retry attempts."
 )
-
 websocket_gone_cleanup_failure_total = meter.create_counter(
-    name="websocket_gone_cleanup_failure_total",
-    unit="1",
-    description="HTTP 410 cleanup operations that failed.",
+    "websocket_gone_cleanup_failure_total", unit="1",
+    description="HTTP 410 cleanup operations that failed."
 )
 
 
@@ -317,7 +260,6 @@ def _force_flush_provider(
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     force_flush = getattr(provider, "force_flush", None)
-
     if not callable(force_flush):
         return {
             "attempted": False,
@@ -326,17 +268,14 @@ def _force_flush_provider(
             "timeout_ms": timeout_millis,
             "error": None,
         }
-
     error_message = None
     succeeded = False
-
     try:
         result = force_flush(timeout_millis=timeout_millis)
         succeeded = result is not False
-    except Exception as error:  # pragma: no cover - defensive runtime path
+    except Exception as error:  # pragma: no cover
         error_message = str(error)
         logger.warning("otel_%s_flush_failed: %s", signal_name, error)
-
     return {
         "attempted": True,
         "succeeded": succeeded,
@@ -347,9 +286,7 @@ def _force_flush_provider(
 
 
 def flush_otel() -> dict[str, Any]:
-    """Hand metrics first, then traces, to the local Collector with hard bounds."""
     started_at = time.perf_counter()
-
     metric_result = _force_flush_provider(
         metrics.get_meter_provider(),
         _env_int("OTEL_METRIC_FLUSH_TIMEOUT_MS", 200),
@@ -360,7 +297,6 @@ def flush_otel() -> dict[str, Any]:
         _env_int("OTEL_TRACE_FLUSH_TIMEOUT_MS", 100),
         "trace",
     )
-
     return {
         "total_duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
         "metric": metric_result,

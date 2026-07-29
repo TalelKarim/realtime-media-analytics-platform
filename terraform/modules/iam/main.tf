@@ -536,6 +536,7 @@ resource "aws_iam_role_policy" "broadcast_worker" {
 
         Action = [
           "dynamodb:GetItem",
+          "dynamodb:BatchGetItem",
           "dynamodb:DescribeTable"
         ]
 
@@ -555,6 +556,7 @@ resource "aws_iam_role_policy" "broadcast_worker" {
 
         Resource = [
           local.websocket_connections_table_arn,
+          "${local.websocket_connections_table_arn}/index/connection-shard-index",
           local.websocket_subscriptions_table_arn
         ]
       },
