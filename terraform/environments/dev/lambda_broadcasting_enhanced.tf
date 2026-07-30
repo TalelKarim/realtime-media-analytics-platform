@@ -163,27 +163,27 @@ module "lambda_broadcast_worker" {
 
     # Short, explicit, observable retries. Botocore retries are disabled for
     # postToConnection inside the code to avoid hidden double-retry behavior.
-    APIGW_MAX_ATTEMPTS          = "3"
+    APIGW_MAX_ATTEMPTS            = "3"
     APIGW_CONNECT_TIMEOUT_SECONDS = "1.0"
     APIGW_READ_TIMEOUT_SECONDS    = "2.0"
     APIGW_RETRY_BASE_DELAY_MS     = "40"
     APIGW_RETRY_MAX_DELAY_MS      = "250"
     APIGW_RETRY_JITTER_RATIO      = "0.25"
 
-    MAX_CLEANUP_WORKERS             = "4"
-    SNAPSHOT_READ_WORKERS           = "4"
-    DYNAMODB_MAX_POOL_CONNECTIONS   = "32"
-    DYNAMODB_BATCH_GET_MAX_RETRIES  = "5"
-    MAX_WEBSOCKET_PAYLOAD_BYTES     = "30000"
-    CHUNK_SIZE_SAFETY_BYTES         = "512"
-    MAX_FAILURE_LOGS_PER_JOB        = "20"
+    MAX_CLEANUP_WORKERS            = "4"
+    SNAPSHOT_READ_WORKERS          = "4"
+    DYNAMODB_MAX_POOL_CONNECTIONS  = "32"
+    DYNAMODB_BATCH_GET_MAX_RETRIES = "5"
+    MAX_WEBSOCKET_PAYLOAD_BYTES    = "30000"
+    CHUNK_SIZE_SAFETY_BYTES        = "512"
+    MAX_FAILURE_LOGS_PER_JOB       = "20"
     # Individual delivery errors never replay the complete connection shard.
     # Structural failures still fail the SQS job; fresh state supersedes old
     # state and the frontend rejects older sequence/window cursors.
-    FAIL_JOB_ON_POST_ERRORS         = "false"
-    FAIL_JOB_IF_NO_DELIVERIES       = "false"
-    TRACE_POST_TO_CONNECTION_CALLS  = "false"
-    BACKBONE_TEST_DELAY_MS          = "0"
+    FAIL_JOB_ON_POST_ERRORS        = "false"
+    FAIL_JOB_IF_NO_DELIVERIES      = "false"
+    TRACE_POST_TO_CONNECTION_CALLS = "false"
+    BACKBONE_TEST_DELAY_MS         = "0"
 
     OTEL_ENABLED      = "true"
     OTEL_SERVICE_NAME = "realtime-media-analytics-${var.environment}-broadcast-worker"

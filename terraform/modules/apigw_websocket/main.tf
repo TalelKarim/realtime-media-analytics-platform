@@ -120,7 +120,12 @@ locals {
   )
 
   custom_domain_mapping_key = (
-    trim(coalesce(var.custom_domain_api_mapping_key, ""), "/") == ""
+    trim(
+    var.custom_domain_api_mapping_key != null
+    ? var.custom_domain_api_mapping_key
+    : "",
+    "/"
+  ) == ""
     ? null
     : trim(coalesce(var.custom_domain_api_mapping_key, ""), "/")
   )
