@@ -203,12 +203,11 @@ module "lambda_broadcast_worker" {
     OTEL_METRICS_EXPORTER = "otlp"
     OTEL_LOGS_EXPORTER    = "none"
 
-    # Freshness metrics are force-flushed after non-stale jobs. Keep the
-    # background reader slow to avoid redundant exports from warm Workers.
+    # Metrics are flushed first because freshness is the primary SLI.
     ENABLE_OTEL_FLUSH              = "true"
     OTEL_METRIC_FLUSH_TIMEOUT_MS   = "200"
     OTEL_TRACE_FLUSH_TIMEOUT_MS    = "100"
-    OTEL_METRIC_EXPORT_INTERVAL_MS = "60000"
+    OTEL_METRIC_EXPORT_INTERVAL_MS = "10000"
     OTEL_BSP_SCHEDULE_DELAY_MS     = "5000"
     OTEL_BSP_MAX_EXPORT_BATCH_SIZE = "128"
     OTEL_BSP_MAX_QUEUE_SIZE        = "2048"

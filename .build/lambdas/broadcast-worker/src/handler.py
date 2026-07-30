@@ -54,6 +54,7 @@ from .observability import (
     websocket_batch_topics_count,
     websocket_chunks_per_connection,
     websocket_connection_gone_total,
+    websocket_delivery_total,
     websocket_gone_cleanup_failure_total,
     websocket_messages_sent_total,
     websocket_payload_build_failure_total,
@@ -1116,7 +1117,10 @@ def fanout_connections(
 
             if status == "success":
                 sent_chunks += 1
-                websocket_post_success_total.add(1, {"environment": ENVIRONMENT})
+                websocket_delivery_total.add(
+                    1,
+                    {"environment": ENVIRONMENT, "result": "success"},
+                )
                 websocket_messages_sent_total.add(1, {"environment": ENVIRONMENT})
                 success_at_ms = to_int(chunk.get("success_at_ms"), 0)
                 latest_reference_ms = to_int(
@@ -1139,17 +1143,21 @@ def fanout_connections(
                 if not connection_gone:
                     connection_gone = True
                     gone_connections.append(connection_result)
-                    websocket_connection_gone_total.add(
-                        1, {"environment": ENVIRONMENT}
+                    websocket_delivery_total.add(
+                        1,
+                        {"environment": ENVIRONMENT, "result": "gone"},
                     )
             else:
                 failed_chunks += 1
-                websocket_post_failure_total.add(1, {"environment": ENVIRONMENT})
                 if chunk.get("retry_exhausted"):
                     retry_exhausted += 1
-                    websocket_post_retry_exhausted_total.add(
-                        1, {"environment": ENVIRONMENT}
-                    )
+                    delivery_result = "retry_exhausted"
+                else:
+                    delivery_result = "failure"
+                websocket_delivery_total.add(
+                    1,
+                    {"environment": ENVIRONMENT, "result": delivery_result},
+                )
                 if failure_logs < MAX_FAILURE_LOGS_PER_JOB:
                     failure_logs += 1
                     log_json(
@@ -1245,12 +1253,6 @@ def _stale_result(
     job_started_at: float,
 ) -> dict[str, Any]:
     duration_ms = round((time.perf_counter() - job_started_at) * 1000, 2)
-    stale_broadcast_jobs_skipped_total.add(
-        1, {"environment": ENVIRONMENT, "stage": stage}
-    )
-    broadcast_worker_jobs_total.add(
-        1, {"environment": ENVIRONMENT, "result": "stale_skipped"}
-    )
     result = {
         "status": "stale_skipped",
         "stage": stage,
@@ -1476,6 +1478,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     aws_request_id = getattr(context, "aws_request_id", None)
     batch_item_failures: list[dict[str, str]] = []
     direct_results: list[dict[str, Any]] = []
+    should_flush_metrics = False
 
     try:
         for message_id, job, sqs_record in iter_input_jobs(event):
@@ -1518,13 +1521,13 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                     span.set_attribute("broadcast.result", str(result.get("status")))
                     span.set_status(Status(StatusCode.OK))
                     direct_results.append(result)
+                    if result.get("status") != "stale_skipped":
+                        should_flush_metrics = True
                 except Exception as error:
-                    broadcast_worker_jobs_failed_total.add(
+                    should_flush_metrics = True
+                    broadcast_worker_jobs_total.add(
                         1,
-                        {
-                            "environment": ENVIRONMENT,
-                            "error_type": type(error).__name__,
-                        },
+                        {"environment": ENVIRONMENT, "result": "failed"},
                     )
                     span.record_exception(error)
                     span.set_status(Status(StatusCode.ERROR, str(error)))
@@ -1551,7 +1554,14 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         business_duration_ms = round(
             (time.perf_counter() - invocation_started_at) * 1000, 2
         )
-        flush_result = flush_otel() if ENABLE_OTEL_FLUSH else None
+        flush_result = (
+            flush_otel(
+                flush_metrics=should_flush_metrics,
+                flush_traces=True,
+            )
+            if ENABLE_OTEL_FLUSH
+            else None
+        )
         log_json(
             "INFO",
             "broadcast_worker_invocation_completed",

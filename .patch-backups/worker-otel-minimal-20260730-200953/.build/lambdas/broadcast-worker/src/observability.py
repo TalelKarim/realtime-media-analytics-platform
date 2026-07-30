@@ -92,23 +92,72 @@ def setup_otel() -> None:
             ),
         )
 
-        # Export only the product-critical freshness histogram.
-        # The exact 10-second boundary is retained for the dashboard SLO.
+        # Keep only four dashboard-critical histograms and use compact buckets.
+        # 10 seconds remains an exact boundary for the freshness SLO.
         freshness_boundaries_ms = [
             0.0,
+            1000.0,
             2000.0,
-            4000.0,
-            6000.0,
-            8000.0,
+            3000.0,
+            5000.0,
+            7500.0,
             10000.0,
             15000.0,
             30000.0,
+            60000.0,
+        ]
+        duration_boundaries_ms = [
+            0.0,
+            25.0,
+            50.0,
+            100.0,
+            250.0,
+            500.0,
+            1000.0,
+            2000.0,
+            5000.0,
+            10000.0,
+            30000.0,
+        ]
+        queue_delay_boundaries_ms = [
+            0.0,
+            100.0,
+            250.0,
+            500.0,
+            1000.0,
+            2000.0,
+            3000.0,
+            5000.0,
+            10000.0,
+            30000.0,
+            60000.0,
         ]
         views = [
             View(
                 instrument_name="event_to_dashboard_latency_ms",
                 aggregation=ExplicitBucketHistogramAggregation(
                     boundaries=freshness_boundaries_ms,
+                    record_min_max=False,
+                ),
+            ),
+            View(
+                instrument_name="broadcast_worker_duration_ms",
+                aggregation=ExplicitBucketHistogramAggregation(
+                    boundaries=duration_boundaries_ms,
+                    record_min_max=False,
+                ),
+            ),
+            View(
+                instrument_name="fanout_duration_ms",
+                aggregation=ExplicitBucketHistogramAggregation(
+                    boundaries=duration_boundaries_ms,
+                    record_min_max=False,
+                ),
+            ),
+            View(
+                instrument_name="broadcast_job_queue_delay_ms",
+                aggregation=ExplicitBucketHistogramAggregation(
+                    boundaries=queue_delay_boundaries_ms,
                     record_min_max=False,
                 ),
             ),
@@ -136,28 +185,63 @@ tracer = trace.get_tracer("realtime-media-analytics.broadcast-worker")
 meter = metrics.get_meter("realtime-media-analytics.broadcast-worker")
 
 # ---------------------------------------------------------------------------
-# Minimal Mimir metric surface
+# Retained low-cardinality counters
 # ---------------------------------------------------------------------------
-# Keep only one histogram and two bounded-label counters. Operational details
-# remain available in structured logs, native AWS metrics and Tempo spans.
 
-websocket_delivery_total = meter.create_counter(
-    "websocket_delivery_total",
+websocket_post_success_total = meter.create_counter(
+    "websocket_post_success_total",
     unit="1",
-    description=(
-        "WebSocket delivery outcomes. The result label is bounded to "
-        "success, failure, gone or retry_exhausted."
-    ),
+    description="Successful API Gateway WebSocket postToConnection calls.",
 )
-
+websocket_post_failure_total = meter.create_counter(
+    "websocket_post_failure_total",
+    unit="1",
+    description="Failed postToConnection calls excluding HTTP 410.",
+)
+websocket_connection_gone_total = meter.create_counter(
+    "websocket_connection_gone_total",
+    unit="1",
+    description="Stale WebSocket connections detected with HTTP 410.",
+)
 broadcast_worker_jobs_total = meter.create_counter(
     "broadcast_worker_jobs_total",
     unit="1",
-    description=(
-        "Non-stale Worker job outcomes. The result label is bounded to "
-        "success or failed."
-    ),
+    description="Shard-centric Worker jobs completed or stale-skipped.",
 )
+broadcast_worker_jobs_failed_total = meter.create_counter(
+    "broadcast_worker_jobs_failed_total",
+    unit="1",
+    description="Structurally failed Worker jobs returned to SQS.",
+)
+stale_broadcast_jobs_skipped_total = meter.create_counter(
+    "stale_broadcast_jobs_skipped_total",
+    unit="1",
+    description="Jobs skipped because LATEST already points to a newer state.",
+)
+websocket_payload_build_failure_total = meter.create_counter(
+    "websocket_payload_build_failure_total",
+    unit="1",
+    description="Connections skipped because one topic update could not fit safely.",
+)
+websocket_post_retry_total = meter.create_counter(
+    "websocket_post_retry_total",
+    unit="1",
+    description="Additional postToConnection attempts after retryable errors.",
+)
+websocket_post_retry_exhausted_total = meter.create_counter(
+    "websocket_post_retry_exhausted_total",
+    unit="1",
+    description="Chunks still failing after all bounded retry attempts.",
+)
+websocket_gone_cleanup_failure_total = meter.create_counter(
+    "websocket_gone_cleanup_failure_total",
+    unit="1",
+    description="HTTP 410 cleanup operations that failed.",
+)
+
+# ---------------------------------------------------------------------------
+# Retained dashboard-critical histograms
+# ---------------------------------------------------------------------------
 
 event_to_dashboard_latency_ms = meter.create_histogram(
     "event_to_dashboard_latency_ms",
@@ -167,23 +251,29 @@ event_to_dashboard_latency_ms = meter.create_histogram(
         "latest_event_timestamp_ms among topics contained in that chunk."
     ),
 )
+broadcast_worker_duration_ms = meter.create_histogram(
+    "broadcast_worker_duration_ms",
+    unit="ms",
+    description="Worker job duration excluding the bounded OTel flush.",
+)
+fanout_duration_ms = meter.create_histogram(
+    "fanout_duration_ms",
+    unit="ms",
+    description="Duration of one bounded-parallel connection-shard fan-out.",
+)
+broadcast_job_queue_delay_ms = meter.create_histogram(
+    "broadcast_job_queue_delay_ms",
+    unit="ms",
+    description="Delay between Coordinator job creation and Worker start.",
+)
 
 # ---------------------------------------------------------------------------
-# Disabled diagnostics
+# Disabled high-volume diagnostics
 # ---------------------------------------------------------------------------
-# Preserve the handler API with no-op instruments. These values are already
-# emitted in `broadcast_worker_job_completed`, failure logs, AWS/Lambda metrics,
-# AWS/SQS metrics and Tempo spans. No Mimir series are created for them.
+# Their values are already present in the structured
+# `broadcast_worker_job_completed` log. Keeping these names as no-op objects
+# avoids invasive handler changes while stopping their Mimir series entirely.
 
-websocket_post_success_total = _NOOP
-websocket_post_failure_total = _NOOP
-websocket_connection_gone_total = _NOOP
-broadcast_worker_jobs_failed_total = _NOOP
-stale_broadcast_jobs_skipped_total = _NOOP
-websocket_payload_build_failure_total = _NOOP
-websocket_post_retry_total = _NOOP
-websocket_post_retry_exhausted_total = _NOOP
-websocket_gone_cleanup_failure_total = _NOOP
 websocket_messages_sent_total = _NOOP
 websocket_post_duration_ms = _NOOP
 oldest_event_to_dashboard_latency_ms = _NOOP
@@ -197,9 +287,6 @@ broadcast_worker_query_duration_ms = _NOOP
 websocket_payload_size_bytes = _NOOP
 websocket_batch_topics_count = _NOOP
 websocket_chunks_per_connection = _NOOP
-broadcast_worker_duration_ms = _NOOP
-fanout_duration_ms = _NOOP
-broadcast_job_queue_delay_ms = _NOOP
 
 
 def _force_flush_provider(
@@ -234,43 +321,17 @@ def _force_flush_provider(
     }
 
 
-def _skipped_flush_result(timeout_millis: int, reason: str) -> dict[str, Any]:
-    return {
-        "attempted": False,
-        "succeeded": True,
-        "duration_ms": 0.0,
-        "timeout_ms": timeout_millis,
-        "error": None,
-        "skipped_reason": reason,
-    }
-
-
-def flush_otel(
-    *,
-    flush_metrics: bool = True,
-    flush_traces: bool = True,
-) -> dict[str, Any]:
+def flush_otel() -> dict[str, Any]:
     started_at = time.perf_counter()
-    metric_timeout_ms = _env_int("OTEL_METRIC_FLUSH_TIMEOUT_MS", 200)
-    trace_timeout_ms = _env_int("OTEL_TRACE_FLUSH_TIMEOUT_MS", 100)
-
-    metric_result = (
-        _force_flush_provider(
-            metrics.get_meter_provider(),
-            metric_timeout_ms,
-            "metric",
-        )
-        if flush_metrics
-        else _skipped_flush_result(metric_timeout_ms, "no_metric_work")
+    metric_result = _force_flush_provider(
+        metrics.get_meter_provider(),
+        _env_int("OTEL_METRIC_FLUSH_TIMEOUT_MS", 200),
+        "metric",
     )
-    trace_result = (
-        _force_flush_provider(
-            trace.get_tracer_provider(),
-            trace_timeout_ms,
-            "trace",
-        )
-        if flush_traces
-        else _skipped_flush_result(trace_timeout_ms, "disabled")
+    trace_result = _force_flush_provider(
+        trace.get_tracer_provider(),
+        _env_int("OTEL_TRACE_FLUSH_TIMEOUT_MS", 100),
+        "trace",
     )
     return {
         "total_duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
