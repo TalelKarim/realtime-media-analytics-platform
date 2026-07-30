@@ -52,7 +52,7 @@ grafana_external_id    = "3355686"
 
 # enhaned broadcasting 
 
-subscription_shard_count                  = 6
+subscription_shard_count                  = 10
 broadcast_worker_max_concurrency          = 20
 broadcast_shard_jobs_enabled              = true
 broadcast_snapshot_ttl_seconds            = 900
