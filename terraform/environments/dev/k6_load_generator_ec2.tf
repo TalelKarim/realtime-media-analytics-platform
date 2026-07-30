@@ -1,12 +1,15 @@
-# Temporary EC2 load generator for k6 WebSocket tests.
-# Location: terraform/environments/dev/k6_load_generator_ec2.tf
+# -----------------------------------------------------------------------------
+# Temporary EC2 load generator for k6 WebSocket tests
+# File: terraform/environments/dev/k6_load_generator_ec2.tf
 #
-# Target capacity:
-# - Up to ~10,000 persistent WebSocket connections
-# - Amazon Linux 2023 x86_64
-# - Public subnet in the default VPC
-# - Browser-based EC2 Instance Connect over the public IPv4 address
-# - k6 and Linux socket tuning installed through user_data
+# Purpose:
+# - Run k6 from AWS instead of the corporate Mac/network
+# - Support tests up to roughly 10,000 persistent WebSocket connections
+# - Use Amazon Linux 2023 x86_64
+# - Deploy in the default VPC, in the default public subnet of us-east-1a
+# - Connect through EC2 Instance Connect using the public IPv4 address
+# - Install k6 and tune Linux automatically with user_data
+# -----------------------------------------------------------------------------
 
 variable "k6_load_generator_enabled" {
   description = "Create the temporary EC2 instance used to run k6 WebSocket load tests."
@@ -15,16 +18,20 @@ variable "k6_load_generator_enabled" {
 }
 
 variable "k6_load_generator_instance_type" {
-  description = "EC2 type for the k6 load generator. m7i.4xlarge gives 16 vCPU and 64 GiB RAM."
+  description = "EC2 instance type for the k6 generator. m7i.4xlarge provides 16 vCPU and 64 GiB RAM."
   type        = string
   default     = "m7i.4xlarge"
 }
 
 variable "k6_load_generator_availability_zone" {
-  description = "Availability Zone supporting the selected k6 EC2 instance type."
+  description = "Availability Zone supporting the selected instance type."
   type        = string
   default     = "us-east-1a"
 }
+
+# -----------------------------------------------------------------------------
+# Default VPC and the default subnet in the explicitly selected AZ
+# -----------------------------------------------------------------------------
 
 data "aws_vpc" "k6_default" {
   count   = var.k6_load_generator_enabled ? 1 : 0
@@ -50,34 +57,39 @@ data "aws_subnet" "k6_default_public" {
   }
 }
 
+# Always resolve the current Amazon Linux 2023 x86_64 AMI in this region.
 data "aws_ssm_parameter" "k6_al2023_ami" {
   count = var.k6_load_generator_enabled ? 1 : 0
   name  = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 }
 
+# AWS-managed source ranges used by browser-based EC2 Instance Connect.
 data "aws_ec2_managed_prefix_list" "k6_ec2_instance_connect" {
   count = var.k6_load_generator_enabled ? 1 : 0
   name  = "com.amazonaws.us-east-1.ec2-instance-connect"
 }
 
+# -----------------------------------------------------------------------------
+# Security group
+# -----------------------------------------------------------------------------
+
 resource "aws_security_group" "k6_load_generator" {
   count = var.k6_load_generator_enabled ? 1 : 0
 
   name_prefix = "realtime-media-analytics-dev-k6-"
-  description = "EC2 Instance Connect access for the temporary k6 load generator"
+  description = "Temporary k6 generator: SSH through EC2 Instance Connect"
   vpc_id      = data.aws_vpc.k6_default[0].id
 
   ingress {
-    description     = "SSH from the regional EC2 Instance Connect service"
+    description     = "SSH from AWS EC2 Instance Connect in us-east-1"
     from_port       = 22
     to_port         = 22
     protocol        = "tcp"
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.k6_ec2_instance_connect[0].id]
   }
 
-  # Required for package installation, Git clone and WSS/HTTPS load generation.
   egress {
-    description = "Outbound access for package repositories, Git and WebSocket tests"
+    description = "Outbound Internet access for packages, Git and WSS tests"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -89,6 +101,7 @@ resource "aws_security_group" "k6_load_generator" {
     Project     = "realtime-media-analytics"
     Environment = "dev"
     Purpose     = "k6-load-generator"
+    ManagedBy   = "Terraform"
   }
 
   lifecycle {
@@ -96,16 +109,22 @@ resource "aws_security_group" "k6_load_generator" {
   }
 }
 
+# -----------------------------------------------------------------------------
+# EC2 instance
+# -----------------------------------------------------------------------------
+
 resource "aws_instance" "k6_load_generator" {
   count = var.k6_load_generator_enabled ? 1 : 0
 
   ami                         = data.aws_ssm_parameter.k6_al2023_ami[0].value
   instance_type               = var.k6_load_generator_instance_type
+  availability_zone           = var.k6_load_generator_availability_zone
   subnet_id                   = data.aws_subnet.k6_default_public[0].id
   vpc_security_group_ids      = [aws_security_group.k6_load_generator[0].id]
   associate_public_ip_address = true
 
-  # EC2 Instance Connect pushes a short-lived SSH key, so no persistent key pair is required.
+  # EC2 Instance Connect injects a short-lived SSH public key.
+  # No persistent EC2 key pair is required.
   key_name = null
 
   user_data_replace_on_change = true
@@ -130,12 +149,14 @@ resource "aws_instance" "k6_load_generator" {
 
     dnf update -y
 
-    # Essential utilities.
     dnf install -y \
+      bind-utils \
       ca-certificates \
       curl \
       git \
       gzip \
+      htop \
+      iftop \
       iproute \
       jq \
       procps-ng \
@@ -143,31 +164,28 @@ resource "aws_instance" "k6_load_generator" {
       tmux \
       unzip
 
-    # Useful monitoring/debug tools. Do not fail the bootstrap if one optional
-    # package is temporarily unavailable in the repository.
-    dnf install -y htop iftop bind-utils || true
+    # Amazon Linux 2023 generally contains EC2 Instance Connect already.
+    rpm -q ec2-instance-connect || dnf install -y ec2-instance-connect
 
-    # Amazon Linux 2023 normally includes EC2 Instance Connect already.
-    rpm -q ec2-instance-connect || dnf install -y ec2-instance-connect || true
-
-    # Official Grafana k6 RPM repository and package.
+    # Official Grafana k6 RPM repository.
     dnf install -y https://dl.k6.io/rpm/repo.rpm
     dnf install -y k6
 
-    # Raise the open-file/socket limit for the ec2-user SSH sessions.
+    # Raise the open-file limit used by ec2-user SSH sessions.
     cat >/etc/security/limits.d/99-k6.conf <<'LIMITS'
     ec2-user soft nofile 250000
     ec2-user hard nofile 250000
     LIMITS
 
-    # Also raise the default systemd limit for services/tools started through systemd.
+    # Also raise the systemd default for processes started through systemd.
     mkdir -p /etc/systemd/system.conf.d
+
     cat >/etc/systemd/system.conf.d/99-k6-limits.conf <<'SYSTEMD_LIMITS'
     [Manager]
     DefaultLimitNOFILE=250000
     SYSTEMD_LIMITS
 
-    # Client-side TCP tuning for several thousand persistent outbound sockets.
+    # Linux client-side tuning for several thousand persistent outbound sockets.
     cat >/etc/sysctl.d/99-k6.conf <<'SYSCTL'
     fs.file-max = 500000
     net.core.somaxconn = 65535
@@ -182,59 +200,88 @@ resource "aws_instance" "k6_load_generator" {
     chown -R ec2-user:ec2-user /home/ec2-user/load-tests
 
     cat >/home/ec2-user/README-K6.txt <<'README'
-    k6 load generator is ready.
+    K6 LOAD GENERATOR
+    =================
 
-    Verify:
-      k6 version
-      ulimit -n
-      free -h
-      nproc
+    1. Verify bootstrap
 
-    Clone the project:
-      git clone -b v2 <YOUR_GIT_REPOSITORY_URL>
-      cd realtime-media-analytics-platform
+       sudo cloud-init status --wait
+       cat /var/log/k6-ready.log
+       k6 version
+       ulimit -n
+       free -h
+       nproc
 
-    Smoke test:
-      k6 run \
-        -e WS_URL="wss://stream-websocket.talelkarimchebbi.com" \
-        -e CONNECTIONS=10 \
-        -e HOLD_SECONDS=60 \
-        -e RAMP_SECONDS=10 \
-        -e SUBSCRIBE_PAYLOAD='{"action":"subscribe","topic":"global"}' \
-        load-tests/websocket-connections.js
+    2. Clone the repository
 
-    10,000-connection test:
-      tmux new -s k6-10000
+       git clone -b v2 <YOUR_GIT_REPOSITORY_URL>
+       cd realtime-media-analytics-platform
 
-      k6 run \
-        -e WS_URL="wss://stream-websocket.talelkarimchebbi.com" \
-        -e CONNECTIONS=10000 \
-        -e HOLD_SECONDS=900 \
-        -e RAMP_SECONDS=300 \
-        -e SUBSCRIBE_PAYLOAD='{"action":"subscribe","topic":"global"}' \
-        load-tests/websocket-connections.js \
-        2>&1 | tee "k6-10000-$(date +%Y%m%d-%H%M%S).log"
+    3. Smoke test
 
-    Detach tmux:
-      Ctrl+B, then D
+       k6 run \
+         -e WS_URL="wss://stream-websocket.talelkarimchebbi.com" \
+         -e CONNECTIONS=10 \
+         -e HOLD_SECONDS=60 \
+         -e RAMP_SECONDS=10 \
+         -e SUBSCRIBE_PAYLOAD='{"action":"subscribe","topic":"global"}' \
+         load-tests/websocket-connections.js
 
-    Reattach:
-      tmux attach -t k6-10000
+    4. Test with 5,000 connections
 
-    Monitor in other terminals:
-      htop
-      watch -n 2 'free -h'
-      watch -n 2 'ss -Htan state established | wc -l'
-      watch -n 2 'ps -C k6 -o pid,%cpu,%mem,rss,vsz,etime,cmd'
+       tmux new -s k6-5000
+
+       k6 run \
+         -e WS_URL="wss://stream-websocket.talelkarimchebbi.com" \
+         -e CONNECTIONS=5000 \
+         -e HOLD_SECONDS=900 \
+         -e RAMP_SECONDS=180 \
+         -e SUBSCRIBE_PAYLOAD='{"action":"subscribe","topic":"global"}' \
+         load-tests/websocket-connections.js \
+         2>&1 | tee "k6-5000-$(date +%Y%m%d-%H%M%S).log"
+
+    5. Test with 10,000 connections
+
+       tmux new -s k6-10000
+
+       k6 run \
+         -e WS_URL="wss://stream-websocket.talelkarimchebbi.com" \
+         -e CONNECTIONS=10000 \
+         -e HOLD_SECONDS=900 \
+         -e RAMP_SECONDS=300 \
+         -e SUBSCRIBE_PAYLOAD='{"action":"subscribe","topic":"global"}' \
+         load-tests/websocket-connections.js \
+         2>&1 | tee "k6-10000-$(date +%Y%m%d-%H%M%S).log"
+
+    6. Detach and reattach tmux
+
+       Detach:   Ctrl+B, then D
+       Reattach: tmux attach -t k6-10000
+
+    7. Monitor the generator from other terminals
+
+       htop
+       watch -n 2 'free -h'
+       watch -n 2 'ss -Htan state established | wc -l'
+       watch -n 2 'ps -C k6 -o pid,%cpu,%mem,rss,vsz,etime,cmd'
     README
 
     chown ec2-user:ec2-user /home/ec2-user/README-K6.txt
 
     {
       echo "Bootstrap completed at $(date -Is)"
+      echo
       k6 version
-      sysctl net.ipv4.ip_local_port_range
+      echo
+      echo "CPU:"
+      nproc
+      echo
+      echo "Memory:"
+      free -h
+      echo
+      echo "Kernel limits:"
       sysctl fs.file-max
+      sysctl net.ipv4.ip_local_port_range
     } >/var/log/k6-ready.log
   USER_DATA
 
@@ -246,6 +293,10 @@ resource "aws_instance" "k6_load_generator" {
     ManagedBy   = "Terraform"
   }
 }
+
+# -----------------------------------------------------------------------------
+# Outputs
+# -----------------------------------------------------------------------------
 
 output "k6_load_generator_instance_id" {
   description = "Instance ID to select in the EC2 Instance Connect console."
