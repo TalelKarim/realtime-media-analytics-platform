@@ -45,11 +45,7 @@ export default function () {
 
   sleep(staggerSeconds);
 
-  const wsUrl = __ENV.WS_URL;
-
-  if (!wsUrl) {
-    throw new Error('WS_URL is required');
-  }
+  const wsUrl = __ENV.WS_URL || 'wss://stream-websocket.talelkarimchebbi.com';
 
   /*
    * Cette valeur doit être exactement le message envoyé

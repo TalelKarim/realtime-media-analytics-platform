@@ -66,7 +66,7 @@ npm -v
 Il faut aussi avoir ton API Gateway WebSocket déjà déployée, par exemple :
 
 ```text
-wss://xxxx.execute-api.us-east-1.amazonaws.com/dev
+wss://stream-websocket.talelkarimchebbi.com
 ```
 
 ---
@@ -100,7 +100,7 @@ cp .env.example .env
 Exemple de `.env` :
 
 ```env
-VITE_WS_URL=wss://xxxx.execute-api.us-east-1.amazonaws.com/dev
+VITE_WS_URL=wss://stream-websocket.talelkarimchebbi.com
 VITE_DEFAULT_TOPICS=global
 VITE_HEARTBEAT_ACTION=heartbeat
 VITE_HEARTBEAT_INTERVAL_MS=240000

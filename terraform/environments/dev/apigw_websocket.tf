@@ -7,6 +7,13 @@ module "apigw_websocket" {
   route_selection_expression = "$request.body.action"
   auto_deploy                = true
 
+
+  # Same workspace: destroy/apply recreates the API, ACM certificate,
+  # API Gateway custom domain, mapping and Route53 alias with the same FQDN.
+  custom_domain_name            = var.websocket_custom_domain_name
+  hosted_zone_name              = var.domain_name
+  custom_domain_api_mapping_key = null
+
   enable_access_logs           = true
   access_log_retention_in_days = 14
   logging_level                = "INFO"

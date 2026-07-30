@@ -60,6 +60,5 @@ broadcast_jobs_visibility_timeout_seconds = 180
 broadcast_jobs_max_receive_count          = 5
 enhaned_broadcasting_enabled              = true
 
-
-
-
+# Fixed public WebSocket URL
+websocket_custom_domain_name = "stream-websocket.talelkarimchebbi.com"

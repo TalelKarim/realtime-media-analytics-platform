@@ -48,7 +48,7 @@ export const SettingsPanel = ({ settings, enabled, onSettingsChange, onEnabledCh
           <input
             value={settings.wsUrl}
             onChange={(event: ChangeEvent<HTMLInputElement>) => update('wsUrl', sanitizeWebSocketUrl(event.target.value))}
-            placeholder="wss://xxxx.execute-api.us-east-1.amazonaws.com/dev"
+            placeholder="wss://stream-websocket.talelkarimchebbi.com"
             className="w-full rounded-2xl border border-slate-800 bg-slate-900/80 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-sky-500"
           />
         </label>

@@ -228,3 +228,13 @@ variable "enhaned_broadcasting_enabled" {
   type        = bool
   default     = true
 }
+
+# ============================================================
+# API Gateway WebSocket custom domain (same dev workspace)
+# ============================================================
+
+variable "websocket_custom_domain_name" {
+  description = "Stable public WebSocket hostname created and mapped by this same dev Terraform workspace."
+  type        = string
+  default     = "stream-websocket.talelkarimchebbi.com"
+}

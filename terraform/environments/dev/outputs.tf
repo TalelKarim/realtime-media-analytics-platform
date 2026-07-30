@@ -312,8 +312,18 @@ output "websocket_api_endpoint" {
 }
 
 output "websocket_url" {
-  description = "API Gateway WebSocket URL including stage."
+  description = "Preferred fixed WebSocket URL."
+  value       = module.apigw_websocket.websocket_url
+}
+
+output "websocket_default_execute_api_url" {
+  description = "Generated execute-api URL retained only for diagnostics and the API Gateway Management API."
   value       = module.apigw_websocket.invoke_url
+}
+
+output "websocket_custom_domain_name" {
+  description = "Fixed public WebSocket hostname."
+  value       = module.apigw_websocket.custom_domain_name
 }
 
 output "websocket_manage_connections_arn" {

@@ -31,6 +31,16 @@ const sanitizeTopics = (topics: string[] | undefined): string[] => {
   return safeTopics.length > 0 ? Array.from(new Set(safeTopics)) : ['global'];
 };
 
+const resolveStoredWebSocketUrl = (storedUrl: string | undefined): string => {
+  const sanitizedStoredUrl = sanitizeWebSocketUrl(storedUrl);
+  if (!sanitizedStoredUrl) return DEFAULT_SETTINGS.wsUrl;
+
+  const isGeneratedExecuteApiUrl = /^wss:\/\/[^.]+\.execute-api\.[^.]+\.amazonaws\.com(?:\/|$)/i.test(sanitizedStoredUrl);
+  return isGeneratedExecuteApiUrl && DEFAULT_SETTINGS.wsUrl
+    ? DEFAULT_SETTINGS.wsUrl
+    : sanitizedStoredUrl;
+};
+
 const loadSettings = (): DashboardSettings => {
   try {
     const stored = window.localStorage.getItem(LOCAL_STORAGE_KEYS.settings);
@@ -40,7 +50,7 @@ const loadSettings = (): DashboardSettings => {
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
-      wsUrl: sanitizeWebSocketUrl(parsed.wsUrl ?? DEFAULT_SETTINGS.wsUrl),
+      wsUrl: resolveStoredWebSocketUrl(parsed.wsUrl),
       defaultTopics: sanitizeTopics(parsed.defaultTopics ?? DEFAULT_SETTINGS.defaultTopics),
       heartbeatAction: parsed.heartbeatAction?.trim() || DEFAULT_SETTINGS.heartbeatAction,
       heartbeatIntervalMs: Number.isFinite(parsed.heartbeatIntervalMs) && Number(parsed.heartbeatIntervalMs) > 0
