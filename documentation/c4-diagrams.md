@@ -1,104 +1,168 @@
-# Architecture Diagrams — Realtime Media Analytics Platform
-# Format: Mermaid — renderable in GitHub, GitLab, Notion, VSCode
+# C4 Diagrams — V2
 
----
-
-
-## DIAGRAM 1 — C4 Level 1 : System Context
+## 1. System context
 
 ```mermaid
 C4Context
-  title System Context — Realtime Media Analytics Platform
+  title Realtime Media Analytics Platform — System Context
 
-  Person(analyst, "Media Analyst", "Monitors live Wikipedia activity via the dashboard")
-  Person(ops, "Platform Engineer", "Operates and monitors the platform infrastructure")
+  Person(analyst, "Analyst", "Views live Wikimedia activity and historical dashboards")
+  Person(operator, "Platform Operator", "Operates AWS, Terraform Cloud and observability")
 
-  System(platform, "Realtime Media Analytics Platform", "Ingests Wikimedia EventStreams, processes events in real time, serves live dashboards, and archives source-fidelity envelopes for historical analysis")
+  System(platform, "Realtime Media Analytics Platform", "Ingests, aggregates, broadcasts, alerts and archives Wikimedia activity")
+  System_Ext(wikimedia, "Wikimedia EventStreams", "Public recentchange SSE feed")
+  System_Ext(grafana, "Grafana Cloud", "Metrics, logs and traces")
+  System_Ext(email, "Email recipient", "Receives SNS alerts")
+  System_Ext(github, "GitHub Actions", "Builds and deploys the dashboard")
 
-  System_Ext(wikimedia, "Wikimedia EventStreams", "Public SSE stream of changes across Wikipedia, Wikidata, Wikimedia Commons — ~1000 events/sec")
-  System_Ext(quicksight, "Amazon QuickSight", "Business intelligence dashboards for historical analytics")
-  System_Ext(sns_email, "Email / SMS", "Alert notifications for anomaly detection")
-
-  Rel(wikimedia, platform, "Streams recentchange events", "SSE / HTTPS")
-  Rel(platform, analyst, "Pushes real-time stats every ~3s", "WebSocket")
-  Rel(platform, quicksight, "Exposes historical data", "Athena / S3")
-  Rel(platform, sns_email, "Sends spike alerts", "SNS")
-  Rel(ops, platform, "Monitors and operates", "Grafana Cloud / CloudWatch / Terraform")
-  Rel(analyst, quicksight, "Views historical dashboards", "HTTPS")
+  Rel(wikimedia, platform, "Streams recentchange events", "HTTPS/SSE")
+  Rel(analyst, platform, "Uses live and historical dashboards", "HTTPS/WSS")
+  Rel(platform, grafana, "Exports telemetry", "OTLP and AWS integration")
+  Rel(platform, email, "Sends anomaly alerts", "SNS")
+  Rel(operator, platform, "Deploys and operates", "Terraform Cloud/AWS")
+  Rel(github, platform, "Deploys static frontend", "OIDC/S3/CloudFront")
 ```
 
----
-
-## DIAGRAM 2 — C4 Level 2 : Container Diagram
+## 2. Container view
 
 ```mermaid
 C4Container
-  title Container Diagram — Realtime Media Analytics Platform
+  title Realtime Media Analytics Platform — Containers
 
-  System_Ext(wikimedia, "Wikimedia EventStreams", "SSE stream ~1000 events/sec")
-  Person(analyst, "Media Analyst", "")
+  Person(analyst, "Analyst")
+  System_Ext(wikimedia, "Wikimedia EventStreams")
+  System_Ext(grafana, "Grafana Cloud")
 
-  Container_Boundary(ingestion, "Ingestion Layer") {
-    Container(collector, "SSE Collector", "ECS Fargate / Python", "Maintains SSE connection, filters canary events, normalizes records, embeds raw_event, batches to Kinesis")
-  }
+  Container(collector, "Collector", "ECS Fargate / Python", "Maintains SSE, validates, samples and publishes normalized envelopes")
+  Container(kinesis, "Event Backbone", "Kinesis Data Streams", "Retains and fans out source events")
+  Container(realtime, "Realtime Processor", "AWS Lambda / Python", "Builds event-time aggregates and broadcast signals")
+  Container(alert, "Alert Processor", "AWS Lambda / Python", "Builds baselines and publishes alerts")
+  ContainerDb(aggregates, "Realtime Aggregates", "DynamoDB", "Materialized 1-minute counters")
+  ContainerQueue(signal, "Broadcast Signal", "SQS FIFO", "Sequential coalesced coordination requests")
+  Container(coordinator, "Broadcast Coordinator", "AWS Lambda / Python", "Creates immutable snapshots/manifests and shard jobs")
+  ContainerDb(snapshots, "Broadcast Snapshots", "DynamoDB", "Snapshots, manifests, LATEST and idempotency")
+  ContainerQueue(jobs, "Broadcast Jobs", "SQS FIFO", "One ordered job per connection shard")
+  Container(worker, "Broadcast Workers", "AWS Lambda / Python", "Queries shard recipients, chunks and fans out")
+  ContainerDb(connections, "WebSocket Connections", "DynamoDB", "Connection topic lists and shard GSI")
+  Container(apigw, "WebSocket API", "API Gateway v2", "Connection lifecycle and frame delivery")
+  Container(frontend, "Live Dashboard", "React/Vite/S3/CloudFront", "Displays live topic snapshots")
+  Container(firehose, "Delivery Stream", "Kinesis Firehose", "Buffers source envelopes to S3")
+  ContainerDb(lake, "Medallion Data Lake", "S3/Glue/Athena", "Bronze, Silver and Gold analytics")
+  Container(quicksight, "Historical Dashboard", "QuickSight", "Business intelligence")
 
-  Container_Boundary(streaming, "Streaming Backbone") {
-    Container(kinesis, "Kinesis Data Streams", "AWS Kinesis", "Central event backbone — fan-out point for all consumers")
-  }
-
-  Container_Boundary(realtime, "Real-Time Processing") {
-    Container(rt_processor, "Realtime Processor", "AWS Lambda", "Computes 1-minute aggregates, executes bounded-parallel DynamoDB updates, and sends 3-second broadcast signals")
-    Container(dynamodb, "DynamoDB", "AWS DynamoDB", "Stores real-time aggregates, WebSocket connections, and alert state")
-    Container(sqs, "Broadcast Signal Queue", "AWS SQS FIFO", "Deduplicates broadcast triggers by 3-second broadcast window")
-    Container(broadcaster, "Broadcaster", "AWS Lambda", "Reads aggregates with bounded parallelism, scans connections, filters topics, and fans out snapshots with bounded parallelism")
-    Container(apigw, "API Gateway WebSocket", "AWS API Gateway", "Manages persistent WebSocket connections with dashboard clients")
-    Container(dashboard, "Live Dashboard", "React / WebSocket", "Real-time visualization of Wikimedia activity")
-  }
-
-  Container_Boundary(observability, "Observability") {
-    Container(alloy, "Grafana Alloy", "ECS sidecar", "Receives Collector OTLP telemetry and exports it to Grafana Cloud")
-    Container(otel_ext, "OTel Collector Lambda Extension", "Lambda extension", "Receives Processor and Broadcaster OTLP telemetry locally")
-    Container(grafana, "Grafana Cloud", "Mimir / Loki / Tempo", "Central metrics, logs, traces, dashboards, and alerting")
-    Container(cloudwatch, "CloudWatch", "AWS native telemetry", "Native AWS service metrics and application log groups")
-  }
-
-  Container_Boundary(historical, "Historical Analytics") {
-    Container(firehose, "Firehose Delivery Stream", "AWS Kinesis Firehose", "Buffers and delivers normalized envelopes to S3 Bronze")
-    Container(s3, "S3 Data Lake", "AWS S3", "Bronze / Silver / Gold zones — envelope archive, cleaned Parquet, aggregated datasets")
-    Container(glue, "Glue ETL Jobs", "AWS Glue", "Transforms bronze→silver→gold on hourly schedule")
-    Container(athena, "Athena", "AWS Athena", "SQL query engine on S3 Parquet data")
-  }
-
-  Container_Boundary(alerting, "Alerting") {
-    Container(alert_proc, "Alert Processor", "AWS Lambda", "Persists rolling alert state in DynamoDB and detects spikes")
-    Container(sns, "SNS Topic", "AWS SNS", "Delivers alerts via email or SMS")
-  }
-
-  Rel(wikimedia, collector, "SSE raw events", "HTTPS / SSE")
-  Rel(collector, kinesis, "Normalized envelope + raw_event", "PutRecords")
-  Rel(kinesis, rt_processor, "Event batches", "Kinesis trigger")
-  Rel(kinesis, firehose, "Normalized envelopes", "Kinesis consumer")
-  Rel(kinesis, alert_proc, "Event batches", "Kinesis trigger")
-  Rel(rt_processor, dynamodb, "Atomic counter updates", "UpdateItem ADD")
-  Rel(rt_processor, sqs, "3-second broadcast signal + W3C trace context", "SendMessage FIFO")
-  Rel(sqs, broadcaster, "Deduplicated signal", "SQS trigger")
-  Rel(broadcaster, dynamodb, "Read aggregates + Scan connections", "BatchGetItem + Query + Scan + DeleteItem")
-  Rel(broadcaster, apigw, "Push snapshots", "postToConnection")
-  Rel(apigw, dashboard, "stats.update messages", "WebSocket")
-  Rel(analyst, dashboard, "Views live metrics", "Browser")
-  Rel(firehose, s3, "Envelope JSON Lines", "S3 delivery")
-  Rel(glue, s3, "Read bronze, write silver/gold", "S3 read/write")
-  Rel(athena, s3, "SQL scans", "S3 read")
-  Rel(alert_proc, dynamodb, "Persist rolling state", "UpdateItem ADD + Query")
-  Rel(alert_proc, sns, "Spike alerts", "Publish")
-  Rel(collector, alloy, "OTLP metrics and traces", "HTTP/protobuf")
-  Rel(rt_processor, otel_ext, "OTLP metrics and traces", "localhost:4318")
-  Rel(broadcaster, otel_ext, "OTLP metrics and traces", "localhost:4318")
-  Rel(alloy, grafana, "Export telemetry", "OTLP")
-  Rel(otel_ext, grafana, "Export telemetry", "OTLP")
-  Rel(cloudwatch, grafana, "AWS managed metrics", "Grafana AWS integration")
-  Rel(collector, cloudwatch, "Structured logs", "CloudWatch Logs")
-  Rel(rt_processor, cloudwatch, "Structured logs", "CloudWatch Logs")
-  Rel(broadcaster, cloudwatch, "Structured logs", "CloudWatch Logs")
+  Rel(wikimedia, collector, "SSE")
+  Rel(collector, kinesis, "PutRecords")
+  Rel(kinesis, realtime, "Lambda event source mapping")
+  Rel(kinesis, alert, "Lambda event source mapping")
+  Rel(kinesis, firehose, "Source stream")
+  Rel(realtime, aggregates, "Atomic UpdateItem")
+  Rel(realtime, signal, "SendMessage FIFO")
+  Rel(signal, coordinator, "batch_size=1")
+  Rel(coordinator, aggregates, "BatchGet/Query")
+  Rel(coordinator, snapshots, "Put/Update")
+  Rel(coordinator, jobs, "SendMessageBatch")
+  Rel(jobs, worker, "Parallel MessageGroupIds")
+  Rel(worker, snapshots, "Get/BatchGet")
+  Rel(worker, connections, "Query GSI")
+  Rel(worker, apigw, "postToConnection")
+  Rel(apigw, frontend, "WSS frames")
+  Rel(frontend, apigw, "Connect/subscribe/heartbeat")
+  Rel(firehose, lake, "JSONL GZIP")
+  Rel(lake, quicksight, "Athena datasets")
+  Rel(analyst, frontend, "HTTPS")
+  Rel(analyst, quicksight, "HTTPS")
+  Rel(collector, grafana, "OTLP through Alloy")
+  Rel(realtime, grafana, "OTLP extension")
+  Rel(coordinator, grafana, "OTLP extension")
+  Rel(worker, grafana, "OTLP extension")
 ```
 
+## 3. Broadcasting component view
+
+```mermaid
+C4Component
+  title Broadcasting V2 — Components
+
+  ContainerQueue(signal, "broadcast-signal.fifo", "SQS FIFO")
+  Component(signalParser, "Signal parser and trace extractor", "Coordinator")
+  Component(idempotency, "Idempotency lease", "Coordinator", "Conditional DynamoDB coordination")
+  Component(snapshotBuilder, "Snapshot builder", "Coordinator", "Reads aggregate read models")
+  Component(manifestBuilder, "Manifest/LATEST manager", "Coordinator")
+  Component(jobPublisher, "Shard job publisher", "Coordinator")
+  ContainerDb(aggregates, "realtime_aggregates", "DynamoDB")
+  ContainerDb(snapshotDb, "broadcast_snapshots", "DynamoDB")
+  ContainerQueue(jobs, "broadcast-jobs.fifo", "SQS FIFO")
+  Component(staleGuard, "LATEST stale guard", "Worker")
+  Component(connectionReader, "Connection shard reader", "Worker")
+  Component(snapshotReader, "Manifest/snapshot reader", "Worker")
+  Component(payloadBuilder, "Per-connection chunk builder", "Worker")
+  Component(fanout, "Bounded HTTP fan-out", "Worker")
+  ContainerDb(connections, "websocket_connections", "DynamoDB")
+  Container(apigw, "Management API", "API Gateway")
+
+  Rel(signal, signalParser, "SQS event")
+  Rel(signalParser, idempotency, "canonical signal")
+  Rel(idempotency, snapshotDb, "lease")
+  Rel(snapshotBuilder, aggregates, "read")
+  Rel(snapshotBuilder, snapshotDb, "snapshot")
+  Rel(manifestBuilder, snapshotDb, "manifest + LATEST")
+  Rel(jobPublisher, jobs, "one job/shard")
+  Rel(jobs, staleGuard, "job")
+  Rel(staleGuard, snapshotDb, "strong Get LATEST")
+  Rel(connectionReader, connections, "Query GSI")
+  Rel(snapshotReader, snapshotDb, "Get/BatchGet")
+  Rel(payloadBuilder, snapshotReader, "updates")
+  Rel(fanout, apigw, "postToConnection")
+```
+
+## 4. Deployment view
+
+```mermaid
+flowchart TB
+  subgraph AWS[Amazon Web Services — us-east-1]
+    subgraph VPC[Application VPC]
+      subgraph Private[Private subnets]
+        ECS[ECS Fargate Collector + Alloy sidecar]
+      end
+      NAT[NAT Gateway]
+      VPCE[VPC endpoints]
+    end
+
+    KDS[Kinesis]
+    L1[Realtime Processor Lambda]
+    L2[Alert Processor Lambda]
+    L3[Coordinator Lambda]
+    L4[Worker Lambda environments x N]
+    DDB[(DynamoDB tables)]
+    SQS[[SQS FIFO queues + DLQs]]
+    APIGW[Regional API Gateway WebSocket]
+    R53[Route 53]
+    ACM[ACM certificate]
+    S3[S3 Data Lake + Dashboard]
+    CF[CloudFront]
+    GLUE[Glue/Athena/QuickSight]
+  end
+
+  WM[Wikimedia Internet] --> NAT --> ECS
+  ECS --> VPCE --> KDS
+  KDS --> L1
+  KDS --> L2
+  L1 --> DDB
+  L1 --> SQS
+  SQS --> L3 --> DDB
+  L3 --> SQS --> L4
+  L4 --> DDB
+  L4 --> APIGW
+  ACM --> APIGW
+  R53 --> APIGW
+  CF --> S3
+  S3 --> GLUE
+```
+
+## 5. Boundary notes
+
+- API Gateway owns physical WebSocket connection state.
+- DynamoDB stores application connection metadata and subscriptions.
+- Workers do not hold persistent client sockets; they call the API Gateway Management API.
+- The Collector is the only long-running business compute component.
+- Grafana Cloud is external to the AWS account; Lambda telemetry first reaches a local extension.

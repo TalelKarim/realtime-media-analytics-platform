@@ -88,3 +88,25 @@ variable "throttling_burst_limit" {
   type        = number
   default     = 50
 }
+
+# ============================================================
+# WebSocket custom domain managed in this same Terraform workspace
+# ============================================================
+
+variable "custom_domain_name" {
+  description = "Optional stable WebSocket custom domain. Null disables ACM, Route53, API Gateway custom domain, and API mapping creation."
+  type        = string
+  default     = null
+}
+
+variable "hosted_zone_name" {
+  description = "Public Route53 hosted-zone name containing the WebSocket custom domain. Required when custom_domain_name is set."
+  type        = string
+  default     = null
+}
+
+variable "custom_domain_api_mapping_key" {
+  description = "Optional API mapping key. Null or empty maps the custom-domain root directly to the WebSocket stage."
+  type        = string
+  default     = null
+}

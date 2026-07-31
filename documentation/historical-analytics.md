@@ -1,359 +1,175 @@
-# Historical Analytics — Realtime Media Analytics Platform
+# Historical Analytics — Bronze, Silver and Gold
 
----
+## 1. Purpose
 
-## Flow
+The historical path preserves normalized source events independently from the low-latency dashboard. It supports replay, SQL exploration and BI without reading DynamoDB live aggregates.
 
-```
-Kinesis Data Streams
-  → Kinesis Firehose       (buffer 64MB / 5min → S3)
-  → S3 Bronze              (normalized envelope + raw_event, immutable)
-  → Glue ETL bronze→silver (hourly, Parquet)
-  → S3 Silver              (cleaned, typed, null-safe)
-  → Glue ETL silver→gold   (hourly, pre-aggregated)
-  → S3 Gold                (5 datasets)
-  → Glue Data Catalog      (partition projection)
-  → Athena                 (SQL on S3)
-  → QuickSight             (SPICE dashboards)
+```text
+Kinesis
+→ Firehose
+→ S3 Bronze
+→ Glue Bronze-to-Silver
+→ S3 Silver Parquet
+→ Glue Silver-to-Gold
+→ S3 Gold Parquet
+→ Athena / QuickSight
 ```
 
----
+## 2. Firehose delivery
 
-## Kinesis Firehose
+Terraform source: `terraform/environments/dev/firehose.tf`.
 
-Dedicated Kinesis consumer for archival. No code, no servers.
+| Setting | Value |
+|---|---:|
+| Source | Kinesis Data Streams |
+| Destination | encrypted S3 data lake |
+| Buffer size | 64 MiB |
+| Buffer interval | 300 seconds |
+| Log retention | 14 days |
 
-```
-Source         : Kinesis Data Streams (parallel consumer alongside Realtime Processor)
-Destination    : S3 bronze zone
-Buffer size    : 64 MB
-Buffer time    : 300 seconds (5 minutes)
-Trigger        : whichever condition is met first
-Compression    : GZIP on delivery
-Latency        : Bronze envelope files available in S3 within 5 minutes
-```
+Firehose delivers whichever threshold is reached first. At the current sampled dev volume, time is often the trigger.
 
-Firehose reads the same Kinesis record consumed by the real-time path: the normalized envelope with an embedded `raw_event`.
+`DeliveryToS3.DataFreshness` is measured in seconds and represents the age of the oldest record still buffered/not delivered to S3. It is not the WebSocket freshness SLI.
 
-Dynamic partitioning uses the envelope-level `occurred_at` field, not the Firehose delivery timestamp:
+## 3. Bronze layer
 
-```
+Prefix contract:
+
+```text
 bronze/wikimedia/recentchange/
-  year=!{partitionKeyFromQuery:year}/
-  month=!{partitionKeyFromQuery:month}/
-  day=!{partitionKeyFromQuery:day}/
-  hour=!{partitionKeyFromQuery:hour}/
+  year=YYYY/
+  month=MM/
+  day=DD/
+  hour=HH/
 ```
 
-This prevents late-arriving events from landing in the wrong S3 partition.
-
----
-
-## S3 Data Lake — Medallion Architecture
-
-```
-s3://realtime-media-analytics-datalake/
-├── bronze/
-│   └── wikimedia/recentchange/
-│       └── year=2026/month=06/day=11/hour=16/
-│           └── wikimedia-recentchange-2026-06-11-16-05-00-uuid.json.gz
-│
-├── silver/
-│   └── wikimedia/recentchange/
-│       └── ingestion_date=2026-06-11/
-│           └── part-00000.parquet
-│
-└── gold/
-    ├── top_wikis_by_hour/year=2026/month=06/day=11/hour=16/
-    ├── top_pages_by_day/year=2026/month=06/day=11/
-    ├── bot_vs_human_by_hour/year=2026/month=06/day=11/hour=16/
-    ├── change_type_distribution/year=2026/month=06/day=11/hour=16/
-    └── activity_spikes/year=2026/month=06/day=11/
-```
-
-### Bronze — Normalized envelope + raw_event
-
-```
-Format    : JSON Lines (.json.gz)
-Schema    : Contract 2 — normalized envelope with embedded raw_event
-Purpose   : immutable source-fidelity archive, event replay, schema recovery
-Retention : 2 years → Glacier after 90 days
-```
-
-Bronze is not raw-only. It stores the exact Kinesis envelope produced by the Collector.  
-The original Wikimedia JSON remains available inside `raw_event`.
-
-### Silver — Cleaned
-
-```
-Format    : Apache Parquet, SNAPPY compression
-Schema    : typed, null-safe normalized schema (see data-contracts.md Contract 12)
-Purpose   : ad-hoc Athena queries across the full event history
-Retention : 1 year → Glacier after 60 days
-```
-
-Silver is built from the envelope-level fields and `payload`. It does not need to include the full `raw_event` by default because Bronze remains the source-fidelity archive.
-
-### Gold — Pre-aggregated
-
-```
-Format    : Apache Parquet, SNAPPY compression
-Schema    : 5 metric-specific datasets (see data-contracts.md Contract 13)
-Purpose   : fast QuickSight dashboards — minimal Athena scan surface
-Retention : 3 years → Standard-IA after 30 days
-```
-
----
-
-## Glue ETL Jobs
-
-### Job 1 — Bronze to Silver
+Format:
 
 ```text
-Name     : wikimedia-bronze-to-silver
-Trigger  : hourly scheduler — processes previous hour's partition
-Runtime  : AWS Glue 4.0, Python 3
-Workers  : 2 × G.1X (scalable)
+JSON Lines
+GZIP
+normalized envelope retained
+raw_event retained
 ```
 
-Transformations applied:
+Bronze is immutable source-fidelity storage. Corrections happen downstream; Bronze should not be destructively rewritten during normal operation.
 
-```python
-from pyspark.sql.functions import col, lower, to_date, to_json, when
+## 4. Silver layer
 
-# Bronze rows are current Contract 2 envelopes:
-# event_id, occurred_at, ingested_at, payload.*, raw_event, optional trace_context
+Glue script: `terraform/modules/glue_etl/scripts/bronze_to_silver.py`.
 
-df = df.filter(col("event_id").isNotNull())
-df = df.filter(col("occurred_at").isNotNull())
+Responsibilities:
 
-df = df.withColumn("ingestion_date", to_date(col("occurred_at")))
-df = df.withColumn("wiki", lower(col("payload.wiki")))
-df = df.withColumn("user_is_bot", col("payload.bot").cast("boolean"))
-df = df.withColumn("is_minor", col("payload.minor").cast("boolean"))
-df = df.withColumn("is_patrolled", col("payload.patrolled").cast("boolean"))
-df = df.withColumn("delta_bytes", col("payload.length_delta"))
+- read Bronze envelopes;
+- reject records missing required identity/time fields;
+- flatten stable envelope/payload fields;
+- cast fields null-safely;
+- serialize complex log parameters when needed;
+- write columnar Parquet with SNAPPY compression;
+- partition by `ingestion_date`.
 
-df = df.withColumn(
-    "log_params",
-    when(col("raw_event.log_params").isNotNull(), to_json(col("raw_event.log_params")))
-    .otherwise(None)
-)
-
-df = df.select(
-    "event_id",
-    "occurred_at",
-    "ingestion_date",
-    "wiki",
-    col("payload.domain").alias("domain"),
-    col("payload.change_type").alias("change_type"),
-    col("payload.namespace").alias("namespace"),
-    col("payload.title").alias("title"),
-    col("payload.title_url").alias("title_url"),
-    col("payload.user").alias("user"),
-    "user_is_bot",
-    "is_minor",
-    "is_patrolled",
-    col("payload.length_old").alias("old_length"),
-    col("payload.length_new").alias("new_length"),
-    "delta_bytes",
-    col("payload.revision_old").alias("revision_old"),
-    col("payload.revision_new").alias("revision_new"),
-    col("payload.change_url").alias("change_url"),
-    col("raw_event.notify_url").alias("raw_notify_url"),
-    col("raw_event.log_type").alias("log_type"),
-    col("raw_event.log_action").alias("log_action"),
-    "log_params",
-    col("raw_event.id").alias("wikimedia_rcid")
-)
-
-df.write.partitionBy("ingestion_date").mode("append").parquet("s3://bucket/silver/...")
-```
-
-### Job 2 — Silver to Gold
-
-```
-Name     : wikimedia-silver-to-gold
-Trigger  : hourly scheduler — after bronze-to-silver completes
-Runtime  : AWS Glue 4.0, Python 3
-Workers  : 2 × G.1X (scalable)
-```
-
-Five aggregations produced:
-
-```python
-# top_wikis_by_hour
-top_wikis = df.groupBy("wiki", window("occurred_at", "1 hour").alias("hour_window")) \
-    .agg(
-        count("*").alias("event_count"),
-        sum(when(col("user_is_bot"), 1).otherwise(0)).alias("bot_count"),
-        sum(when(~col("user_is_bot"), 1).otherwise(0)).alias("human_count"),
-        sum(when(col("change_type") == "edit", 1).otherwise(0)).alias("edit_count"),
-        sum(when(col("change_type") == "new", 1).otherwise(0)).alias("new_count"),
-        sum(when(col("change_type") == "categorize", 1).otherwise(0)).alias("categorize_count"),
-        sum(when(col("change_type") == "log", 1).otherwise(0)).alias("log_count"),
-        sum(when(col("change_type") == "external", 1).otherwise(0)).alias("external_count"),
-    )
-
-# bot_vs_human_by_hour
-bot_human = df.groupBy(window("occurred_at", "1 hour").alias("hour_window")) \
-    .agg(
-        sum(when(col("user_is_bot"), 1).otherwise(0)).alias("bot_count"),
-        sum(when(~col("user_is_bot"), 1).otherwise(0)).alias("human_count"),
-        count("*").alias("total_count"),
-    ) \
-    .withColumn("bot_ratio", col("bot_count") / col("total_count"))
-
-# top_pages_by_day — namespace = 0 only
-top_pages = df.filter(col("namespace") == 0) \
-    .groupBy("wiki", "title", to_date("occurred_at").alias("day")) \
-    .agg(
-        count("*").alias("event_count"),
-        last("change_type").alias("last_change_type"),
-        max("occurred_at").alias("last_seen_at"),
-    )
-
-# change_type_distribution
-change_dist = df.groupBy("change_type", window("occurred_at", "1 hour").alias("hour_window")) \
-    .agg(count("*").alias("event_count"))
-
-# activity_spikes
-# z_score computed over a rolling historical baseline per wiki/global scope.
-```
-
----
-
-## Glue Data Catalog
+Prefix:
 
 ```text
-Database : realtime_media_analytics
-
-Tables:
-  wikimedia_bronze_recentchange  → s3://bucket/bronze/
-  wikimedia_silver_recentchange  → s3://bucket/silver/
-  top_wikis_by_hour              → s3://bucket/gold/top_wikis_by_hour/
-  top_pages_by_day               → s3://bucket/gold/top_pages_by_day/
-  bot_vs_human_by_hour           → s3://bucket/gold/bot_vs_human_by_hour/
-  change_type_distribution       → s3://bucket/gold/change_type_distribution/
-  activity_spikes                → s3://bucket/gold/activity_spikes/
+silver/wikimedia/recentchange/ingestion_date=YYYY-MM-DD/
 ```
 
-Partition projection is configured according to each table's physical layout:
+Silver is the cleaned, typed analytical fact layer. It is not the source of truth for source fidelity; Bronze is.
+
+## 5. Gold layer
+
+Glue script: `terraform/modules/glue_etl/scripts/silver_to_gold.py`.
+
+Current analytical outputs include:
 
 ```text
-Bronze hourly paths       : year / month / day / hour
-Silver paths              : ingestion_date
-Hourly Gold datasets      : year / month / day / hour
-Daily Gold datasets       : year / month / day
+top_wikis_by_hour
+bot_vs_human_by_hour
+change_type_distribution
+top_pages_by_day
+activity_spikes
 ```
 
-Projected tables do not require `MSCK REPAIR TABLE` or per-partition catalog registration after each ETL write.
+Gold datasets are optimized for direct analytical consumption and dashboarding.
 
-## Athena
+## 6. Glue Data Catalog and partition projection
 
-```
-Workgroup       : realtime-media-analytics
-Output location : s3://bucket/athena-results/
-Encryption      : SSE-KMS with the S3 customer-managed key
-Scan limit      : 1 GB per query (cost control)
-```
+Catalog definitions allow Athena to discover Bronze/Silver/Gold schemas. Partition projection reduces the need to register every time partition manually and enables partition pruning when queries include date/hour filters.
 
-### Example queries
+## 7. Athena query discipline
 
-**Top 10 most edited articles in the last 7 days**
+Always filter partitions.
+
+Good:
+
 ```sql
-SELECT wiki, title, COUNT(*) AS edit_count
-FROM wikimedia_silver_recentchange
-WHERE ingestion_date >= DATE_ADD('day', -7, CURRENT_DATE)
-  AND change_type = 'edit'
-  AND namespace = 0
-GROUP BY wiki, title
-ORDER BY edit_count DESC
-LIMIT 10;
-```
-
-**Bot vs human ratio by hour — last 24 hours**
-```sql
-SELECT hour_window, bot_count, human_count,
-       ROUND(bot_ratio * 100, 2) AS bot_pct
-FROM bot_vs_human_by_hour
-WHERE hour_window >= DATE_ADD('hour', -24, NOW())
-ORDER BY hour_window ASC;
-```
-
-**Activity spikes — last 30 days, z_score > 2**
-```sql
-SELECT hour_window, wiki, event_count, ROUND(z_score, 2) AS z_score
-FROM activity_spikes
-WHERE z_score > 2.0
-  AND hour_window >= DATE_ADD('day', -30, CURRENT_DATE)
-ORDER BY z_score DESC
+SELECT wiki, SUM(event_count)
+FROM gold_top_wikis_by_hour
+WHERE event_date BETWEEN DATE '2026-07-01' AND DATE '2026-07-31'
+GROUP BY wiki
+ORDER BY 2 DESC
 LIMIT 20;
 ```
 
-**Most active wikis in the last hour**
+Avoid unrestricted scans of Bronze or all Silver history.
+
+Operational checks:
+
 ```sql
-SELECT wiki, event_count, bot_count, human_count,
-       ROUND(CAST(bot_count AS DOUBLE) / event_count * 100, 1) AS bot_pct
-FROM top_wikis_by_hour
-WHERE hour_window = DATE_TRUNC('hour', NOW() - INTERVAL '1' HOUR)
-ORDER BY event_count DESC
+SELECT COUNT(*)
+FROM silver_wikimedia_recentchange
+WHERE ingestion_date = DATE '2026-07-31';
+```
+
+```sql
+SELECT wiki, COUNT(*) AS events
+FROM silver_wikimedia_recentchange
+WHERE ingestion_date = DATE '2026-07-31'
+GROUP BY wiki
+ORDER BY events DESC
 LIMIT 10;
 ```
 
----
+## 8. QuickSight
 
-## QuickSight
+QuickSight uses Athena-backed datasets and can import results into SPICE. The Terraform module receives an explicit QuickSight principal ARN as owner/manager.
 
-```
-Data source : Athena workgroup realtime-media-analytics
-Refresh     : SPICE incremental refresh every 1 hour
-```
+Recommended dashboard pages:
 
-### Dashboard 1 — Global Activity Overview
-```
-KPIs   : total events 24h / 7d / 30d · average events/hour · peak hour · bot ratio trend
-Charts : events over time (line, hourly) · bot vs human (stacked bar, daily)
-```
+- hourly activity trend;
+- top wikis;
+- bot versus human ratio;
+- change type distribution;
+- top pages;
+- detected activity spikes.
 
-### Dashboard 2 — Top Wikis
-```
-KPIs   : most active wiki last 24h · wiki with highest bot ratio
-Charts : top 10 wikis by count (bar) · wiki activity heatmap (day × hour)
-         · wiki activity trend 30 days (line)
-```
+## 9. Data consistency with the speed layer
 
-### Dashboard 3 — Top Pages
-```
-KPIs   : most edited page last 24h · most created pages last 7d
-Charts : top 20 pages by edit count (horizontal bar) · page activity over time (line)
+The live and historical paths consume the same Kinesis envelopes but have different goals:
+
+```text
+DynamoDB/WebSocket
+→ fast, sampled, mutable current-window view
+
+S3/Glue/Athena
+→ durable, reproducible historical analysis
 ```
 
-### Dashboard 4 — Change Type Distribution
-```
-Charts : edit/new/categorize/log/external distribution (pie, daily)
-         · change type trend 30 days (stacked area)
-         · namespace distribution (bar)
-```
+The project is Lambda-Architecture-inspired, but there is no automated reconciliation process that overwrites live DynamoDB views from Gold results. The two paths should therefore be compared during validation, not assumed exactly identical under retries or late events.
 
-### Dashboard 5 — Activity Spikes
-```
-Charts : spike timeline (event_count + z_score overlay)
-         · annotated spike events table (wiki · hour · count · z_score)
-```
+## 10. Failure handling
 
----
+- Firehose delivery failures are exposed through CloudWatch metrics/logs.
+- S3 is encrypted with a customer-managed KMS key.
+- Glue failures are visible in Glue job runs and CloudWatch Logs.
+- ETL jobs must be rerunnable for a selected partition.
+- Bronze retention must be long enough to support reprocessing.
 
-## Challenges and mitigations
+## 11. Cost controls
 
-**Firehose dynamic partitioning**  
-By default Firehose uses its own delivery timestamp, not the event's `occurred_at`. Late-arriving events would land in the wrong S3 partition. Mitigation: enable dynamic partitioning with a Firehose Lambda transformer or metadata extraction that derives year/month/day/hour from the envelope-level `occurred_at`.
-
-**Small files**  
-Five-minute Firehose buffers produce many small files. Small files degrade Athena scan performance and increase S3 API costs. Mitigation: run a Glue compaction job every 6 hours targeting 128 MB per Parquet file.
-
-**Schema evolution**  
-Wikimedia may add or rename fields. Mitigation: Bronze stores the normalized envelope and preserves the original source object in `raw_event`. Silver ETL explicitly selects known payload columns and discards unknowns. `event_version` enables downstream version detection.
-
-**Athena cost**  
-Athena charges per TB scanned. Mitigations: year/month/day/hour partitioning for pruning · Parquet columnar format for column pruning · SNAPPY compression · 1 GB scan limit per query · gold pre-aggregated tables used by QuickSight instead of Silver.
+- deterministic Collector sampling reduces all downstream volume;
+- Firehose batches small events into larger S3 objects;
+- Parquet/SNAPPY reduces Athena scanned bytes;
+- partition pruning is mandatory;
+- Gold datasets prevent repeated expensive raw scans;
+- QuickSight SPICE avoids repeated interactive Athena queries where appropriate.

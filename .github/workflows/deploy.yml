@@ -3,7 +3,7 @@ name: Deploy Realtime Dashboard
 on:
   push:
     branches:
-      - main
+      - v2
     paths:
       - "frontend/dashboard/**"
       - ".github/workflows/deploy.yml"

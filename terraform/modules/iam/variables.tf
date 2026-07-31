@@ -59,11 +59,39 @@ variable "alert_state_table_name" {
   default     = null
 }
 
+
+
+variable "websocket_subscriptions_table_name" {
+  description = "DynamoDB table containing WebSocket subscriptions partitioned by topic and logical shard"
+  type        = string
+  default     = null
+}
+
+variable "broadcast_snapshots_table_name" {
+  description = "DynamoDB table containing immutable broadcast snapshots"
+  type        = string
+  default     = null
+}
+
+
+
+
+
 variable "broadcast_queue_name" {
   description = "Future SQS FIFO broadcast signal queue name"
   type        = string
   default     = null
 }
+
+
+
+variable "broadcast_jobs_queue_name" {
+  description = "SQS FIFO queue containing sharded broadcast jobs"
+  type        = string
+  default     = null
+}
+
+
 
 variable "alerts_topic_name" {
   description = "Future SNS alerts topic name"
@@ -88,3 +116,6 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+
+

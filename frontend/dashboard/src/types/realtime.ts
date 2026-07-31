@@ -16,6 +16,12 @@ export interface TopPage {
   humanCount: number;
 }
 
+export interface BroadcastCursor {
+  sequence: number;
+  aggregationWindowEpochMs: number;
+  manifestId?: string;
+}
+
 export interface StatsSnapshot {
   topic: TopicName;
   receivedAt: string;
@@ -26,6 +32,9 @@ export interface StatsSnapshot {
   changeTypes: ChartPoint[];
   namespaces: ChartPoint[];
   topPages: TopPage[];
+  sequence?: number;
+  aggregationWindow?: string;
+  manifestId?: string;
   raw?: unknown;
 }
 
@@ -35,6 +44,13 @@ export interface RawRealtimeMessage {
   topic?: string;
   data?: unknown;
   payload?: unknown;
+  updates?: unknown;
+  sequence?: unknown;
+  manifest_id?: unknown;
+  aggregation_window?: unknown;
+  aggregation_window_epoch_ms?: unknown;
+  chunk_index?: unknown;
+  chunk_count?: unknown;
   message?: string;
   error?: string;
   [key: string]: unknown;

@@ -53,3 +53,22 @@ output "integration_ids" {
     route_key => integration.id
   }
 }
+
+output "custom_domain_name" {
+  description = "Stable WebSocket custom domain, or null when disabled."
+  value       = local.custom_domain_enabled ? var.custom_domain_name : null
+}
+
+output "custom_invoke_url" {
+  description = "Stable WSS URL through the custom domain, or null when disabled."
+  value = local.custom_domain_enabled ? (
+    "wss://${var.custom_domain_name}${local.custom_domain_mapping_path}"
+  ) : null
+}
+
+output "websocket_url" {
+  description = "Preferred WebSocket URL: custom-domain URL when enabled, otherwise the generated execute-api URL."
+  value = local.custom_domain_enabled ? (
+    "wss://${var.custom_domain_name}${local.custom_domain_mapping_path}"
+  ) : aws_apigatewayv2_stage.this.invoke_url
+}

@@ -2,7 +2,7 @@ module "lambda_websocket_connect" {
   source = "../../modules/lambda"
 
   function_name = "${local.name_prefix}-websocket-connect"
-  description   = "Handles API Gateway WebSocket $connect route."
+  description   = "Handles API Gateway WebSocket $connect and creates the default sharded subscription."
 
   runtime = "python3.12"
   handler = "src.handler.lambda_handler"
@@ -16,13 +16,33 @@ module "lambda_websocket_connect" {
 
   create_log_group = false
 
+  layers = [
+    module.websocket_python_layer.layer_arn
+  ]
+
   environment_variables = {
     ENVIRONMENT = var.environment
     LOG_LEVEL   = "INFO"
 
-    WEBSOCKET_CONNECTIONS_TABLE_NAME = module.dynamodb.websocket_connections_table_name
-    CONNECTION_TTL_SECONDS           = "7200"
-    DEFAULT_TOPIC                    = "global"
+    WEBSOCKET_CONNECTIONS_TABLE_NAME = (
+      module.dynamodb.websocket_connections_table_name
+    )
+
+    WEBSOCKET_SUBSCRIPTIONS_TABLE_NAME = (
+      module.dynamodb.websocket_subscriptions_table_name
+    )
+
+    CONNECTION_SHARD_COUNT = tostring(
+      var.subscription_shard_count
+    )
+
+    # Legacy dual-write table remains active until Phase 2 validation.
+    SUBSCRIPTION_SHARD_COUNT = tostring(
+      var.subscription_shard_count
+    )
+
+    CONNECTION_TTL_SECONDS = "7200"
+    DEFAULT_TOPIC          = "global"
   }
 
   tags = var.tags
@@ -32,7 +52,7 @@ module "lambda_websocket_disconnect" {
   source = "../../modules/lambda"
 
   function_name = "${local.name_prefix}-websocket-disconnect"
-  description   = "Handles API Gateway WebSocket $disconnect route."
+  description   = "Handles API Gateway WebSocket $disconnect and removes all sharded subscriptions."
 
   runtime = "python3.12"
   handler = "src.handler.lambda_handler"
@@ -46,11 +66,30 @@ module "lambda_websocket_disconnect" {
 
   create_log_group = false
 
+  layers = [
+    module.websocket_python_layer.layer_arn
+  ]
+
   environment_variables = {
     ENVIRONMENT = var.environment
     LOG_LEVEL   = "INFO"
 
-    WEBSOCKET_CONNECTIONS_TABLE_NAME = module.dynamodb.websocket_connections_table_name
+    WEBSOCKET_CONNECTIONS_TABLE_NAME = (
+      module.dynamodb.websocket_connections_table_name
+    )
+
+    WEBSOCKET_SUBSCRIPTIONS_TABLE_NAME = (
+      module.dynamodb.websocket_subscriptions_table_name
+    )
+
+    CONNECTION_SHARD_COUNT = tostring(
+      var.subscription_shard_count
+    )
+
+    # Legacy dual-write table remains active until Phase 2 validation.
+    SUBSCRIPTION_SHARD_COUNT = tostring(
+      var.subscription_shard_count
+    )
   }
 
   tags = var.tags
@@ -60,7 +99,7 @@ module "lambda_websocket_default" {
   source = "../../modules/lambda"
 
   function_name = "${local.name_prefix}-websocket-default"
-  description   = "Handles API Gateway WebSocket $default route for subscribe and unsubscribe messages."
+  description   = "Handles WebSocket subscribe and unsubscribe transactions."
 
   runtime = "python3.12"
   handler = "src.handler.lambda_handler"
@@ -74,11 +113,33 @@ module "lambda_websocket_default" {
 
   create_log_group = false
 
+  layers = [
+    module.websocket_python_layer.layer_arn
+  ]
+
   environment_variables = {
     ENVIRONMENT = var.environment
     LOG_LEVEL   = "INFO"
 
-    WEBSOCKET_CONNECTIONS_TABLE_NAME = module.dynamodb.websocket_connections_table_name
+    WEBSOCKET_CONNECTIONS_TABLE_NAME = (
+      module.dynamodb.websocket_connections_table_name
+    )
+
+    WEBSOCKET_SUBSCRIPTIONS_TABLE_NAME = (
+      module.dynamodb.websocket_subscriptions_table_name
+    )
+
+    CONNECTION_SHARD_COUNT = tostring(
+      var.subscription_shard_count
+    )
+
+    # Legacy dual-write table remains active until Phase 2 validation.
+    SUBSCRIPTION_SHARD_COUNT = tostring(
+      var.subscription_shard_count
+    )
+
+    CONNECTION_TTL_SECONDS    = "7200"
+    MAX_TOPICS_PER_CONNECTION = "50"
   }
 
   tags = var.tags

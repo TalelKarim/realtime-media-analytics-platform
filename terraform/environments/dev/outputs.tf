@@ -134,6 +134,27 @@ output "dynamodb_alert_state_table_arn" {
 }
 
 
+output "dynamodb_websocket_subscriptions_table_name" {
+  description = "Name of the sharded WebSocket subscriptions DynamoDB table."
+  value       = module.dynamodb.websocket_subscriptions_table_name
+}
+
+output "dynamodb_websocket_subscriptions_table_arn" {
+  description = "ARN of the sharded WebSocket subscriptions DynamoDB table."
+  value       = module.dynamodb.websocket_subscriptions_table_arn
+}
+
+output "dynamodb_broadcast_snapshots_table_name" {
+  description = "Name of the broadcast snapshots DynamoDB table."
+  value       = module.dynamodb.broadcast_snapshots_table_name
+}
+
+output "dynamodb_broadcast_snapshots_table_arn" {
+  description = "ARN of the broadcast snapshots DynamoDB table."
+  value       = module.dynamodb.broadcast_snapshots_table_arn
+}
+
+
 # SQS AND SNS outputs
 
 output "sqs_broadcast_signal_queue_name" {
@@ -161,6 +182,39 @@ output "sqs_broadcast_signal_dlq_arn" {
   value       = module.sqs.broadcast_signal_dlq_arn
 }
 
+
+output "sqs_broadcast_jobs_queue_name" {
+  description = "Name of the broadcasting V2 FIFO jobs queue."
+  value       = module.sqs.broadcast_jobs_queue_name
+}
+
+output "sqs_broadcast_jobs_queue_url" {
+  description = "URL of the broadcasting V2 FIFO jobs queue."
+  value       = module.sqs.broadcast_jobs_queue_url
+}
+
+output "sqs_broadcast_jobs_queue_arn" {
+  description = "ARN of the broadcasting V2 FIFO jobs queue."
+  value       = module.sqs.broadcast_jobs_queue_arn
+}
+
+output "sqs_broadcast_jobs_dlq_name" {
+  description = "Name of the broadcasting V2 jobs dead-letter FIFO queue."
+  value       = module.sqs.broadcast_jobs_dlq_name
+}
+
+output "sqs_broadcast_jobs_dlq_url" {
+  description = "URL of the broadcasting V2 jobs dead-letter FIFO queue."
+  value       = module.sqs.broadcast_jobs_dlq_url
+}
+
+output "sqs_broadcast_jobs_dlq_arn" {
+  description = "ARN of the broadcasting V2 jobs dead-letter FIFO queue."
+  value       = module.sqs.broadcast_jobs_dlq_arn
+}
+
+
+
 output "sns_alerts_topic_name" {
   description = "Name of the alerts SNS topic."
   value       = module.sns.alerts_topic_name
@@ -170,6 +224,9 @@ output "sns_alerts_topic_arn" {
   description = "ARN of the alerts SNS topic."
   value       = module.sns.alerts_topic_arn
 }
+
+
+
 
 
 
@@ -255,8 +312,18 @@ output "websocket_api_endpoint" {
 }
 
 output "websocket_url" {
-  description = "API Gateway WebSocket URL including stage."
+  description = "Preferred fixed WebSocket URL."
+  value       = module.apigw_websocket.websocket_url
+}
+
+output "websocket_default_execute_api_url" {
+  description = "Generated execute-api URL retained only for diagnostics and the API Gateway Management API."
   value       = module.apigw_websocket.invoke_url
+}
+
+output "websocket_custom_domain_name" {
+  description = "Fixed public WebSocket hostname."
+  value       = module.apigw_websocket.custom_domain_name
 }
 
 output "websocket_manage_connections_arn" {
@@ -392,4 +459,30 @@ output "grafana_aws_integration_role_arn" {
 output "grafana_aws_integration_role_name" {
   description = "IAM role name used by Grafana Cloud."
   value       = module.grafana_aws_integration.role_name
+}
+
+
+
+
+
+
+
+output "broadcast_coordinator_function_name" {
+  description = "Broadcast Coordinator Lambda function name."
+  value       = module.lambda_broadcast_coordinator.function_name
+}
+
+output "broadcast_coordinator_function_arn" {
+  description = "Broadcast Coordinator Lambda function ARN."
+  value       = module.lambda_broadcast_coordinator.function_arn
+}
+
+output "broadcast_worker_function_name" {
+  description = "Broadcast Worker Lambda function name."
+  value       = module.lambda_broadcast_worker.function_name
+}
+
+output "broadcast_worker_function_arn" {
+  description = "Broadcast Worker Lambda function ARN."
+  value       = module.lambda_broadcast_worker.function_arn
 }
