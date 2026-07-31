@@ -214,12 +214,6 @@ resource "aws_iam_role" "realtime_processor" {
   tags               = merge(local.common_tags, { Name = "${local.name_prefix}-realtime-processor-role" })
 }
 
-resource "aws_iam_role" "broadcaster" {
-  name               = "${local.name_prefix}-broadcaster-role"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
-  tags               = merge(local.common_tags, { Name = "${local.name_prefix}-broadcaster-role" })
-}
-
 
 resource "aws_iam_role" "broadcast_coordinator" {
   name               = "${local.name_prefix}-broadcast-coordinator-role"
@@ -273,7 +267,6 @@ resource "aws_iam_role" "alert_processor" {
 locals {
   lambda_roles = {
     realtime_processor    = aws_iam_role.realtime_processor.name
-    broadcaster           = aws_iam_role.broadcaster.name
     broadcast_coordinator = aws_iam_role.broadcast_coordinator.name
     broadcast_worker      = aws_iam_role.broadcast_worker.name
     websocket_connect     = aws_iam_role.websocket_connect.name
@@ -348,74 +341,6 @@ resource "aws_iam_role_policy" "realtime_processor" {
     ]
   })
 }
-
-resource "aws_iam_role_policy" "broadcaster" {
-  name = "${local.name_prefix}-broadcaster-policy"
-  role = aws_iam_role.broadcaster.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "ConsumeBroadcastQueue"
-        Effect = "Allow"
-        Action = [
-          "sqs:ReceiveMessage",
-          "sqs:DeleteMessage",
-          "sqs:ChangeMessageVisibility",
-          "sqs:GetQueueAttributes",
-          "sqs:GetQueueUrl"
-        ]
-        Resource = local.broadcast_queue_arn
-      },
-      {
-        Sid    = "ReadRealtimeAggregates"
-        Effect = "Allow"
-        Action = [
-          "dynamodb:GetItem",
-          "dynamodb:Query",
-          "dynamodb:BatchGetItem",
-          "dynamodb:DescribeTable"
-        ]
-        Resource = local.realtime_aggregates_table_arn
-      },
-      {
-        Sid    = "ReadAndCleanupWebsocketConnections"
-        Effect = "Allow"
-        Action = [
-          "dynamodb:GetItem",
-          "dynamodb:Query",
-          "dynamodb:Scan",
-          "dynamodb:DeleteItem",
-          "dynamodb:DescribeTable"
-        ]
-        Resource = local.websocket_connections_table_arn
-      },
-      {
-        Sid    = "ManageWebsocketConnections"
-        Effect = "Allow"
-        Action = [
-          "execute-api:ManageConnections"
-        ]
-        Resource = local.websocket_manage_connections_arn
-      },
-      {
-        Sid    = "UseRuntimeKmsKeys"
-        Effect = "Allow"
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey",
-          "kms:DescribeKey"
-        ]
-        Resource = [
-          var.dynamodb_key_arn,
-          var.sqs_key_arn
-        ]
-      }
-    ]
-  })
-}
-
 
 
 resource "aws_iam_role_policy" "broadcast_coordinator" {

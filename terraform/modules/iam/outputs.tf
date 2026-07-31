@@ -13,10 +13,7 @@ output "realtime_processor_role_arn" {
   value       = aws_iam_role.realtime_processor.arn
 }
 
-output "broadcaster_role_arn" {
-  description = "Broadcaster Lambda role ARN"
-  value       = aws_iam_role.broadcaster.arn
-}
+
 
 output "broadcast_coordinator_role_arn" {
   description = "Broadcast Coordinator Lambda role ARN"
@@ -64,7 +61,6 @@ output "lambda_role_arns" {
 
   value = {
     realtime_processor    = aws_iam_role.realtime_processor.arn
-    broadcaster           = aws_iam_role.broadcaster.arn
     broadcast_coordinator = aws_iam_role.broadcast_coordinator.arn
     broadcast_worker      = aws_iam_role.broadcast_worker.arn
     websocket_connect     = aws_iam_role.websocket_connect.arn

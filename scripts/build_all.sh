@@ -15,7 +15,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "${ROOT_DIR}/scripts/build_lambda.sh" broadcast-worker
 
 # Later:
-# "${ROOT_DIR}/scripts/build_lambda.sh" broadcaster
 # "${ROOT_DIR}/scripts/build_lambda.sh" alert-processor
 # "${ROOT_DIR}/scripts/build_lambda.sh" websocket-connect-handler
 # "${ROOT_DIR}/scripts/build_lambda.sh" websocket-disconnect-handler

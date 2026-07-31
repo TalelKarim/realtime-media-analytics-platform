@@ -7,7 +7,6 @@ data "aws_lambda_function" "grafana_promtail" {
 
 locals {
   promtail_forwarded_log_groups = {
-    broadcaster = "/aws/lambda/${var.project}-${var.environment}-broadcaster"
 
     broadcast_coordinator = "/aws/lambda/${var.project}-${var.environment}-broadcast-coordinator"
 

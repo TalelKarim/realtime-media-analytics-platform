@@ -195,11 +195,7 @@ variable "subscription_shard_count" {
   }
 }
 
-variable "broadcast_shard_jobs_enabled" {
-  description = "Publish shard-centric jobs and enable the Phase 2 Worker mapping after controlled validation."
-  type        = bool
-  default     = false
-}
+
 
 variable "broadcast_worker_max_concurrency" {
   description = "Maximum concurrent Worker Lambda invocations."
@@ -221,12 +217,6 @@ variable "broadcast_jobs_visibility_timeout_seconds" {
 variable "broadcast_jobs_max_receive_count" {
   type    = number
   default = 5
-}
-
-variable "enhaned_broadcasting_enabled" {
-  description = "Enable Coordinator and Worker SQS event source mappings."
-  type        = bool
-  default     = true
 }
 
 # ============================================================

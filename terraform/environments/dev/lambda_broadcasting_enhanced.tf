@@ -43,11 +43,7 @@ module "lambda_broadcast_coordinator" {
       var.subscription_shard_count
     )
 
-    # Phase 1 builds snapshots/manifests/LATEST but intentionally publishes no
-    # Worker jobs. Phase 2 flips this variable to true with the new Worker.
-    PUBLISH_SHARD_JOBS = tostring(
-      var.broadcast_shard_jobs_enabled
-    )
+
 
     IDEMPOTENCY_LEASE_SECONDS = "60"
 
