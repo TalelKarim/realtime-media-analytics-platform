@@ -1,194 +1,224 @@
 # Realtime Media Analytics Platform on AWS
 
-AWS-native streaming platform that ingests live Wikimedia activity, processes it in real time, pushes aggregated metrics to a live WebSocket dashboard, and archives a source-fidelity event envelope in a Medallion Data Lake for historical analysis.
+Production-style, event-driven streaming analytics platform that consumes Wikimedia `recentchange` events, builds low-latency read models, pushes immutable snapshots to WebSocket clients, detects activity anomalies, and persists a Medallion Data Lake for historical analytics.
 
----
+The active broadcasting implementation is **V2: Coordinator + sharded Workers + immutable snapshots + Latest State Wins**. The legacy single Broadcaster remains in the uploaded branch only as migration residue and is not connected to SQS.
 
-## High-Level Architecture
+## Validated status
 
-```
-                       ┌──────────────────────────────┐
-                       │   Wikimedia EventStreams      │
-                       │   recentchange SSE ~1000/sec  │
-                       └──────────────┬───────────────┘
-                                      │ HTTPS / SSE
-                                      ▼
-                       ┌──────────────────────────────┐
-                       │   ECS Fargate Collector       │
-                       │ parse · normalize · raw_event │
-                       └──────────────┬───────────────┘
-                                      │ PutRecords
-                                      ▼
-                       ┌──────────────────────────────┐
-                       │   Kinesis Data Streams        │
-                       │   central event backbone      │
-                       └──────┬───────────┬────────────┘
-                              │           │           │
-              ┌───────────────┘           │           └──────────────┐
-              ▼                           ▼                          ▼
- ┌────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
- │ Realtime Processor │    │ Firehose Delivery   │    │ Alert Processor     │
- │ Lambda             │    │ Stream              │    │ Lambda              │
- └────────┬───────────┘    └──────────┬──────────┘    └──────────┬──────────┘
-          │                           │                           │
-          ▼                           ▼                           ▼
- ┌────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
- │ DynamoDB           │    │ S3 Data Lake        │    │ SNS Topic           │
- │ realtime_aggregates│    │ bronze/silver/gold  │    │ alerts              │
- │ websocket_conns    │    └──────────┬──────────┘    └─────────────────────┘
- │ alert_state        │               │
- └────────┬───────────┘               ▼
-          ▼                ┌─────────────────────┐
- ┌────────────────────┐    │ Glue Data Catalog   │
- │ SQS FIFO           │    └──────────┬──────────┘
- │ broadcast signal   │               │
- └────────┬───────────┘               ▼
-          ▼                ┌─────────────────────┐
- ┌────────────────────┐    │ Athena              │
- │ Broadcaster Lambda │    └──────────┬──────────┘
- └────────┬───────────┘               │
-          ▼                           ▼
- ┌────────────────────┐    ┌─────────────────────┐
- │ API Gateway        │    │ QuickSight          │
- │ WebSocket          │    │ historical dashboards│
- └────────┬───────────┘    └─────────────────────┘
-          ▼
- ┌────────────────────┐
- │ Frontend Dashboard │
- │ live visualization │
- └────────────────────┘
-```
+The V2 fan-out path has been validated with a real k6 generator on EC2:
 
----
+| Test | Result |
+|---|---:|
+| Concurrent WebSocket connections | 10,000 / 10,000 |
+| Connection success | 100% |
+| k6 connection errors | 0 |
+| Hold duration | about 20 minutes |
+| Frames received | about 2.54 million |
+| Backend push freshness p95 | about 7 seconds |
+| Connection shards | 10 |
 
-## What it does
+The freshness result is a **backend push SLI**, not yet a browser-visible ground truth. See [`documentation/freshness-and-slo.md`](documentation/freshness-and-slo.md).
 
-| Capability | Technology |
-|---|---|
-| Ingest live Wikimedia SSE stream | ECS Fargate Collector |
-| Normalize events while preserving source fidelity | Normalized envelope + embedded `raw_event` |
-| Fan-out to 3 consumers | Kinesis Data Streams |
-| Real-time aggregation | Lambda + in-memory aggregation + bounded-parallel DynamoDB atomic updates + write sharding |
-| Live dashboard push | SQS FIFO 3-second broadcast signal + bounded-parallel Lambda Broadcaster + API Gateway WebSocket |
-| WebSocket subscription tracking | DynamoDB `websocket_connections` with V1 Scan + Lambda-side topic filtering |
-| Spike alerting | Lambda + DynamoDB `alert_state` + SNS |
-| Historical archive | Firehose + S3 Bronze/Silver/Gold |
-| SQL analytics | Glue + Athena + QuickSight |
-| Observability | OpenTelemetry + Grafana Alloy / Lambda Collector Extension + Grafana Cloud Mimir, Loki, and Tempo |
-| Infrastructure as Code | Terraform + Terraform Cloud |
+## Architecture at a glance
 
-## Architecture patterns demonstrated
+```mermaid
+flowchart LR
+  WM[Wikimedia EventStreams\nrecentchange SSE] --> COL[ECS Fargate Collector]
+  COL -->|PutRecords| KDS[Kinesis Data Streams]
 
-- Real-time event ingestion over SSE
-- Event-driven fan-out with Kinesis
-- Stable normalized event contract with embedded raw source event
-- Deterministic sampling for development cost control
-- Write sharding for DynamoDB hot partition mitigation
-- In-memory aggregation before persistence
-- Atomic counters with `UpdateItem ADD`
-- Bounded parallelism for DynamoDB writes, aggregate reads, and WebSocket fan-out
-- Serverless broadcasting via WebSocket
-- SQS FIFO deduplication by short broadcast windows
-- Medallion Data Lake (Bronze / Silver / Gold)
-- Partition projection on Athena
-- OpenTelemetry metrics and distributed tracing
-- Centralized observability in Grafana Cloud with Mimir, Loki, and Tempo
-- IAM least privilege per component
-- Encryption at rest and in transit with customer-managed KMS keys
+  KDS --> RTP[Realtime Processor Lambda]
+  KDS --> ALP[Alert Processor Lambda]
+  KDS --> FH[Firehose]
 
-## Data source
+  RTP --> AGG[(DynamoDB\nrealtime_aggregates)]
+  RTP --> SIG[[SQS FIFO\nbroadcast-signal]]
+  SIG --> COORD[Broadcast Coordinator Lambda]
+  COORD --> AGG
+  COORD --> SNAP[(DynamoDB\nbroadcast_snapshots)]
+  COORD --> JOBS[[SQS FIFO\nbroadcast-jobs]]
+  JOBS --> WORKER[Broadcast Worker Lambdas]
+  WORKER --> CONN[(DynamoDB\nwebsocket_connections\nGSI connection-shard-index)]
+  WORKER --> SNAP
+  WORKER --> APIGW[API Gateway WebSocket]
+  APIGW --> UI[React Dashboard]
 
-```
-https://stream.wikimedia.org/v2/stream/recentchange
+  ALP --> ALERT[(DynamoDB\nalert_state)]
+  ALP --> SNS[SNS alerts]
+
+  FH --> BRONZE[(S3 Bronze)]
+  BRONZE --> GLUE[Glue ETL]
+  GLUE --> SILVER[(S3 Silver)]
+  GLUE --> GOLD[(S3 Gold)]
+  SILVER --> ATH[Athena]
+  GOLD --> ATH
+  ATH --> QS[QuickSight]
+
+  COL -. OTLP .-> GRAF[Grafana Cloud\nMimir / Loki / Tempo]
+  RTP -. OTLP .-> GRAF
+  COORD -. OTLP .-> GRAF
+  WORKER -. OTLP .-> GRAF
 ```
 
-Public SSE stream of all changes across Wikipedia, Wikidata, and Wikimedia Commons.
-Approximately **1000 events/sec** at peak, covering 5 event types:
-`edit` · `new` · `categorize` · `log` · `external`
+## Main runtime paths
 
-Official schema:
-```
-https://github.com/wikimedia/mediawiki-event-schemas/blob/master/jsonschema/mediawiki/recentchange/current.yaml
-```
-
-The raw Wikimedia event is the JSON object received in the SSE `data:` line.
-The Collector preserves that object under `raw_event` while also building a stable normalized `payload`.
-
----
-
-## Dev Environment — Cost Control & Sampling
-
-Running this platform at full throughput for long periods can be expensive, driven mostly by DynamoDB write volume and downstream processing.
-
-The Collector supports a configurable sampling rate through the `SAMPLE_RATE` environment variable:
+### Real-time aggregation
 
 ```text
-SAMPLE_RATE=0.01   # dev default → keep 1% of valid source events
-SAMPLE_RATE=0.10   # load test / richer demo → keep 10%
-SAMPLE_RATE=1.0    # full stream
+Wikimedia SSE
+→ Collector normalization and deterministic sampling
+→ Kinesis
+→ Realtime Processor
+→ DynamoDB atomic aggregate counters
 ```
 
-### How sampling works
+### WebSocket broadcasting V2
 
-Sampling is deterministic and based on the normalized `event_id`:
-
-```python
-import hashlib
-
-
-def sampling_score(event_id: str) -> float:
-    digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
-    return int(digest[:8], 16) / 0xFFFFFFFF
-
-
-def should_sample(event_id: str, sample_rate: float) -> bool:
-    if sample_rate >= 1.0:
-        return True
-    if sample_rate <= 0.0:
-        return False
-    return sampling_score(event_id) < sample_rate
+```text
+Realtime Processor
+→ broadcast-signal.fifo
+→ Coordinator
+→ immutable topic snapshots + manifest + LATEST pointer
+→ one FIFO job per connection shard
+→ parallel Workers
+→ API Gateway postToConnection
+→ browser
 ```
 
-The same `event_id` always produces the same sampling decision for a given rate.
+### Alerting
 
-### Cost comparison
+```text
+Kinesis
+→ Alert Processor
+→ minute counters and baselines in DynamoDB
+→ z-score / moderation burst evaluation
+→ deduplicated SNS alert
+```
 
-| Mode | Sampling rate | Approximate retained volume |
-|---|---:|---:|
-| Full stream | 100% | 100% of valid events |
-| Rich dev / load test | 10% | ~10% of valid events |
-| Default dev | 1% | ~1% of valid events |
+### Historical analytics
 
-### Important note on sampled metrics
+```text
+Kinesis
+→ Firehose
+→ S3 Bronze JSONL GZIP
+→ Glue Bronze-to-Silver Parquet
+→ Glue Silver-to-Gold aggregates
+→ Athena / QuickSight
+```
 
-All real-time aggregates reflect the sampled input volume. Ratios such as `bot_ratio` remain representative when the sample is sufficiently large, while absolute counters represent only the retained events.
+## Architectural patterns
 
-The architecture, contracts, and processing behavior are unchanged by the sampling rate.
+- Event-Driven Architecture
+- publish/subscribe stream fan-out
+- serverless-first compute with a long-running ECS collector
+- Lambda Architecture-inspired speed and batch paths
+- Medallion Data Lake: Bronze / Silver / Gold
+- CQRS-inspired materialized read models
+- DynamoDB write sharding and atomic `ADD`
+- at-least-once stream/message processing
+- immutable snapshots and manifests
+- sharded WebSocket fan-out
+- Latest State Wins delivery semantics
+- bounded concurrency and explicit backpressure
+- distributed tracing with W3C trace context
+- customer-managed KMS encryption
+
+## Current dev configuration
+
+The values below are read from `terraform/environments/dev/terraform.tfvars` and the Lambda Terraform files.
+
+| Component | Active configuration |
+|---|---|
+| Region | `us-east-1` |
+| Collector | 1 Fargate task, 256 CPU units, 512 MiB |
+| Sampling | 5% deterministic by `event_id` |
+| Collector flush | 100 records or 1 second |
+| Kinesis | provisioned, 1 shard, 48-hour retention |
+| Realtime Processor | 1536 MiB, 60 s, batch 20 or 1 s |
+| Aggregate window | 60 seconds |
+| Broadcast coalescing window | 3 seconds |
+| Coordinator | 512 MiB, 30 s |
+| Connection shards | 10 |
+| Worker | 1024 MiB, 30 s, reserved concurrency 20 |
+| Worker network concurrency | 16 `postToConnection` calls per Worker |
+| Worker HTTP pool | 24 connections per Lambda environment |
+| API Gateway throttle | rate 5000, burst 2000 |
+| Snapshot TTL | 900 seconds |
+| WebSocket connection TTL | 7200 seconds |
+| Firehose buffer | 64 MiB or 300 seconds |
+| Stable WebSocket URL | `wss://stream-websocket.talelkarimchebbi.com` |
+| Dashboard URL | `https://wiki.talelkarimchebbi.com` |
+
+## Delivery semantics
+
+The live dashboard is not an event-by-event guaranteed delivery system.
+
+```text
+Aggregates are authoritative in DynamoDB.
+Snapshots represent recent materialized state.
+Stale jobs are skipped.
+Individual WebSocket delivery failures are retried locally, then abandoned.
+A newer snapshot supersedes an older one.
+The frontend rejects older sequence/window cursors.
+```
+
+This is appropriate for a live analytics dashboard. It would not be appropriate for a payment ledger or a workflow requiring every state transition.
+
+## Source layout
+
+```text
+services/collector                     Long-running Wikimedia SSE producer
+services/realtime-processor            Kinesis aggregation consumer
+services/alert-processor               Kinesis anomaly detection consumer
+services/broadcast-coordinator         Snapshot/manifest/job producer
+services/broadcast-worker              Connection-shard fan-out consumer
+services/websocket-*-handler            WebSocket lifecycle and subscriptions
+frontend/dashboard                     React/Vite live dashboard
+terraform/environments/dev             Active dev composition
+terraform/modules                      Reusable AWS modules
+load-tests                              k6 WebSocket load tests
+documentation                           Architecture and operations documentation
+```
+
+## Build and deployment
+
+Lambda packages are built into `.build/lambdas` and Terraform packages from that directory.
+
+```bash
+./scripts/build_all.sh
+```
+
+The infrastructure is applied through Terraform Cloud. Do not rely on local `terraform output` commands for this project.
+
+The dashboard is built and deployed by GitHub Actions on pushes to branch `v2` that modify `frontend/dashboard/**`.
 
 ## Documentation index
 
-| File | Content |
+| Document | Purpose |
 |---|---|
-| `README.md` | This file — project overview and index |
-| `documentation/architecture.md` | High-level and detailed architecture, ADRs, scalability path, security, observability, runbooks |
-| `documentation/data-contracts.md` | All data contracts across the pipeline (source → Kinesis → DynamoDB → WebSocket → S3 → Gold) |
-| `documentation/sequence-diagrams.md` | All sequence diagrams in Mermaid format |
-| `documentation/historical-analytics.md` | Data Lake architecture, Glue ETL, Athena queries, QuickSight dashboards |
-| `documentation/c4-diagrams.md` | C4 system context and container diagrams|
+| [`architecture.md`](documentation/architecture.md) | Complete system design, responsibilities and failure model |
+| [`data-contracts.md`](documentation/data-contracts.md) | Every event, DynamoDB, SQS and WebSocket contract |
+| [`sequence-diagrams.md`](documentation/sequence-diagrams.md) | End-to-end and failure-path Mermaid sequences |
+| [`c4-diagrams.md`](documentation/c4-diagrams.md) | C4 context, container and component views |
+| [`freshness-and-slo.md`](documentation/freshness-and-slo.md) | Exact freshness calculation, meaning and limitations |
+| [`observability.md`](documentation/observability.md) | Metrics, logs, traces and Grafana topology |
+| [`load-testing.md`](documentation/load-testing.md) | k6 strategy and validated test results |
+| [`operations-runbook.md`](documentation/operations-runbook.md) | Deployment, verification and incident procedures |
+| [`scaling-and-capacity.md`](documentation/scaling-and-capacity.md) | Capacity model and scaling boundaries |
+| [`security.md`](documentation/security.md) | IAM, KMS, networking and secret handling |
+| [`known-limitations.md`](documentation/known-limitations.md) | Honest production gaps and remediation order |
+| [`historical-analytics.md`](documentation/historical-analytics.md) | Bronze/Silver/Gold, Glue, Athena and QuickSight |
+| [`repository-map.md`](documentation/repository-map.md) | Source-to-resource map |
+| [`v2-cleanup.md`](documentation/v2-cleanup.md) | Legacy V1 and migration residue to remove |
+| [`adr/`](documentation/adr/) | Architectural Decision Records |
 
----
+## Known high-priority gaps
 
+1. validate freshness independently at k6/browser receive time;
+2. make aggregate writes idempotent under partial DynamoDB success and Kinesis replay;
+3. remove the legacy single Broadcaster and transitional subscription table;
+4. enable and use Kinesis shard-level metrics before increasing shard count;
+5. test 10,000 users with multiple topics and chunking;
+6. document and test late-event/watermark behavior for alerting.
 
-## AWS services
-
-**Real-time path**  
-ECS Fargate · Kinesis Data Streams · Lambda · DynamoDB · SQS FIFO · API Gateway WebSocket · SNS · CloudWatch · IAM · KMS
-
-**Historical path**  
-Kinesis Firehose · S3 · Glue · Athena · QuickSight
-
-**Observability**  
-OpenTelemetry · Grafana Alloy · OpenTelemetry Collector Lambda Extension · Grafana Cloud Mimir/Loki/Tempo · CloudWatch AWS integration
-
-**Infrastructure**  
-Terraform · Terraform Cloud · GitHub Actions
+See [`documentation/known-limitations.md`](documentation/known-limitations.md) for the full critique.

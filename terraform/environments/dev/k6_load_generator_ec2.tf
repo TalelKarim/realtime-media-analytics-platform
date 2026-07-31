@@ -114,7 +114,7 @@ resource "aws_security_group" "k6_load_generator" {
 # -----------------------------------------------------------------------------
 
 resource "aws_instance" "k6_load_generator" {
-  count = var.k6_load_generator_enabled ? 1 : 0
+  count =  0
 
   ami                         = data.aws_ssm_parameter.k6_al2023_ami[0].value
   instance_type               = var.k6_load_generator_instance_type
