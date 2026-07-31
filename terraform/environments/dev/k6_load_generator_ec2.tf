@@ -168,6 +168,7 @@ resource "aws_instance" "k6_load_generator" {
     rpm -q ec2-instance-connect || dnf install -y ec2-instance-connect
 
     # Official Grafana k6 RPM repository.
+    dnf install -y git
     dnf install -y https://dl.k6.io/rpm/repo.rpm
     dnf install -y k6
 
