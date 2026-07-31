@@ -63,17 +63,3 @@ scripts/build_layer.sh
 scripts/build_lambda.sh
 scripts/build_all.sh
 ```
-
-Rollout validation scripts with `phase1`/`phase2` names are migration artifacts and are listed in `v2-cleanup.md`.
-
-## Documentation ownership
-
-Every source contract should be updated in this order:
-
-```text
-code/Terraform
-→ data-contracts.md
-→ architecture.md and sequence-diagrams.md
-→ README.md
-→ operations/load-test docs
-```

@@ -14,7 +14,7 @@
 variable "k6_load_generator_enabled" {
   description = "Create the temporary EC2 instance used to run k6 WebSocket load tests."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "k6_load_generator_instance_type" {
@@ -114,7 +114,7 @@ resource "aws_security_group" "k6_load_generator" {
 # -----------------------------------------------------------------------------
 
 resource "aws_instance" "k6_load_generator" {
-  count =  0
+  count = var.k6_load_generator_enabled ? 1 : 0
 
   ami                         = data.aws_ssm_parameter.k6_al2023_ami[0].value
   instance_type               = var.k6_load_generator_instance_type

@@ -200,25 +200,12 @@ The dashboard is built and deployed by GitHub Actions on pushes to branch `v2` t
 | [`data-contracts.md`](documentation/data-contracts.md) | Every event, DynamoDB, SQS and WebSocket contract |
 | [`sequence-diagrams.md`](documentation/sequence-diagrams.md) | End-to-end and failure-path Mermaid sequences |
 | [`c4-diagrams.md`](documentation/c4-diagrams.md) | C4 context, container and component views |
-| [`freshness-and-slo.md`](documentation/freshness-and-slo.md) | Exact freshness calculation, meaning and limitations |
 | [`observability.md`](documentation/observability.md) | Metrics, logs, traces and Grafana topology |
 | [`load-testing.md`](documentation/load-testing.md) | k6 strategy and validated test results |
 | [`operations-runbook.md`](documentation/operations-runbook.md) | Deployment, verification and incident procedures |
 | [`scaling-and-capacity.md`](documentation/scaling-and-capacity.md) | Capacity model and scaling boundaries |
-| [`security.md`](documentation/security.md) | IAM, KMS, networking and secret handling |
-| [`known-limitations.md`](documentation/known-limitations.md) | Honest production gaps and remediation order |
 | [`historical-analytics.md`](documentation/historical-analytics.md) | Bronze/Silver/Gold, Glue, Athena and QuickSight |
 | [`repository-map.md`](documentation/repository-map.md) | Source-to-resource map |
-| [`v2-cleanup.md`](documentation/v2-cleanup.md) | Legacy V1 and migration residue to remove |
 | [`adr/`](documentation/adr/) | Architectural Decision Records |
 
-## Known high-priority gaps
 
-1. validate freshness independently at k6/browser receive time;
-2. make aggregate writes idempotent under partial DynamoDB success and Kinesis replay;
-3. remove the legacy single Broadcaster and transitional subscription table;
-4. enable and use Kinesis shard-level metrics before increasing shard count;
-5. test 10,000 users with multiple topics and chunking;
-6. document and test late-event/watermark behavior for alerting.
-
-See [`documentation/known-limitations.md`](documentation/known-limitations.md) for the full critique.
